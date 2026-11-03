@@ -59,7 +59,7 @@ try {
   write("pawno/pawn.cfg", [
     "-d3",
     "-icfg/includes",
-    "-i=pawno/cfg/second",
+    "-i=cfg/second",
     "-O2"
   ].join("\n"));
 
