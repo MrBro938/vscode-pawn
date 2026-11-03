@@ -169,32 +169,6 @@ const findDeclaredName = (
   return { token: name, isArray };
 };
 
-const registerTags = (
-  tokens: PawnToken[],
-  start: number,
-  end: number,
-  symbols: PawnSymbol[],
-  sourceLength: number
-) => {
-  for (let index = start; index + 1 < end; index++) {
-    const token = tokens[index];
-    if (
-      token.kind === "identifier" &&
-      isPunctuation(tokens[index + 1], ":") &&
-      !keywords.has(token.value.toLowerCase())
-    ) {
-      addSymbol(symbols, {
-        name: token.value,
-        kind: "type",
-        start: token.start,
-        end: token.end,
-        scopeStart: 0,
-        scopeEnd: sourceLength,
-      });
-    }
-  }
-};
-
 export const analyzePawn = (text: string): PawnAnalysis => {
   const tokens = tokenizePawn(text);
   const symbols: PawnSymbol[] = [];
@@ -221,13 +195,6 @@ export const analyzePawn = (text: string): PawnAnalysis => {
 
     let next = closeParen + 1;
     if (isPunctuation(tokens[next], ":")) next += 2;
-    if (!isPunctuation(tokens[next], "{")) continue;
-
-    const closeBrace = bracePairs.get(next);
-    if (closeBrace === undefined) continue;
-
-    const scopeStart = tokens[next].end;
-    const scopeEnd = tokens[closeBrace].start;
 
     addSymbol(symbols, {
       name: nameToken.value,
@@ -238,6 +205,16 @@ export const analyzePawn = (text: string): PawnAnalysis => {
       scopeEnd: text.length,
       detail: text.slice(nameToken.start, tokens[closeParen].end).trim(),
     });
+
+    // Forward/native declarations have no local scope. Only index parameters
+    // when a function body exists.
+    if (!isPunctuation(tokens[next], "{")) continue;
+
+    const closeBrace = bracePairs.get(next);
+    if (closeBrace === undefined) continue;
+
+    const scopeStart = tokens[next].end;
+    const scopeEnd = tokens[closeBrace].start;
 
     functions.push({
       name: nameToken.value,
@@ -250,7 +227,6 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     const parameters = splitTopLevel(tokens, index + 2, closeParen, ",");
     parameters.forEach(([paramStart, paramEnd]) => {
       if (paramStart >= paramEnd) return;
-      registerTags(tokens, paramStart, paramEnd, symbols, text.length);
       const declared = findDeclaredName(tokens, paramStart, paramEnd);
       if (!declared) return;
 
@@ -308,7 +284,6 @@ export const analyzePawn = (text: string): PawnAnalysis => {
       const declared = findDeclaredName(tokens, memberStart, memberEnd);
       if (!declared) return;
 
-      registerTags(tokens, memberStart, memberEnd, symbols, text.length);
       addSymbol(symbols, {
         name: declared.token.value,
         kind: "enumMember",
@@ -376,7 +351,6 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     const declarations = splitTopLevel(tokens, index + 1, statementEnd, ",");
     declarations.forEach(([declStart, declEnd]) => {
       if (declStart >= declEnd) return;
-      registerTags(tokens, declStart, declEnd, symbols, text.length);
       const declared = findDeclaredName(tokens, declStart, declEnd);
       if (!declared) return;
 
