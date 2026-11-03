@@ -36,6 +36,10 @@ const PARSE_DEBOUNCE_MS = 150;
 const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
 const completionCache = new Map<string, CompletionItem[]>();
 
+// Contains every Pawn source file discovered in the workspace, including files
+// that are not currently open in the editor.
+const indexedPawnFiles = new Set<string>();
+
 documents.listen(connection);
 
 connection.onInitialize(() => ({
@@ -77,8 +81,18 @@ const scheduleCollectSymbols = (textDocument: TextDocument) => {
   pendingParses.set(uri, timer);
 };
 
-documents.onDidOpen((change) => scheduleCollectSymbols(change.document));
-documents.onDidChangeContent((change) => scheduleCollectSymbols(change.document));
+documents.onDidOpen((change) => {
+  if (change.document.uri.startsWith("file:")) {
+    indexedPawnFiles.add(change.document.uri);
+  }
+  scheduleCollectSymbols(change.document);
+});
+documents.onDidChangeContent((change) => {
+  if (change.document.uri.startsWith("file:")) {
+    indexedPawnFiles.add(change.document.uri);
+  }
+  scheduleCollectSymbols(change.document);
+});
 documents.onDidClose((event) => {
   const pending = pendingParses.get(event.document.uri);
   if (pending) clearTimeout(pending);
@@ -91,11 +105,15 @@ connection.onNotification(
   "pawn/indexFiles",
   (params: { files?: Array<{ uri: string; text: string }>; deleted?: string[] }) => {
     if (params.deleted) {
-      params.deleted.forEach((uri) => removeDocumentSymbols(uri));
+      params.deleted.forEach((uri) => {
+        indexedPawnFiles.delete(uri);
+        removeDocumentSymbols(uri);
+      });
     }
 
     if (params.files) {
       params.files.forEach((file) => {
+        indexedPawnFiles.add(file.uri);
         const document = TextDocument.create(file.uri, "pawn", 1, file.text);
         collectSymbols(document, false);
       });
@@ -227,7 +245,7 @@ const doSignHelp = (
 const resolveIncludeDefinition = (
   document: TextDocument,
   position: Position
-): Location | undefined => {
+): Location | Location[] | undefined => {
   const lines = document.getText().split(/\r?\n/);
   const line = lines[position.line];
   if (line === undefined) return undefined;
@@ -248,37 +266,93 @@ const resolveIncludeDefinition = (
     if (!document.uri.startsWith("file:")) return undefined;
 
     const sourceFile = fileURLToPath(document.uri);
-    const normalizedIncludePath = includePath.replace(/[\\/]+/g, path.sep);
-    const resolvedPath = path.resolve(
-      path.dirname(sourceFile),
-      normalizedIncludePath
+    const normalizedIncludePath = path.normalize(
+      includePath.replace(/[\\/]+/g, path.sep)
     );
 
-    const candidates = [resolvedPath];
-    if (!path.extname(resolvedPath)) {
-      candidates.push(
-        resolvedPath + ".inc",
-        resolvedPath + ".pwn",
-        resolvedPath + ".pawn",
-        resolvedPath + ".p"
+    const includeVariants = [normalizedIncludePath];
+    if (!path.extname(normalizedIncludePath)) {
+      includeVariants.push(
+        normalizedIncludePath + ".inc",
+        normalizedIncludePath + ".pwn",
+        normalizedIncludePath + ".pawn",
+        normalizedIncludePath + ".p"
       );
     }
 
-    const targetPath = candidates.find((candidate) => {
+    // Preserve the original relative-to-current-file behavior as the first
+    // choice. This also supports explicit relative paths such as ../shared/file.
+    const directCandidates = includeVariants.map((candidate) =>
+      path.isAbsolute(candidate)
+        ? path.normalize(candidate)
+        : path.resolve(path.dirname(sourceFile), candidate)
+    );
+
+    const isFile = (candidate: string) => {
       try {
         return fs.statSync(candidate).isFile();
       } catch {
         return false;
       }
+    };
+
+    const directTarget = directCandidates.find(isFile);
+    if (directTarget) {
+      return Location.create(pathToFileURL(directTarget).toString(), {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 0 },
+      });
+    }
+
+    // Module includes are often written relative to a project/module root,
+    // not relative to the file containing the #include. Search the workspace
+    // index by path suffix so the including file can live in any subdirectory.
+    const normalizeForComparison = (value: string) => {
+      const normalized = path.normalize(value);
+      return process.platform === "win32"
+        ? normalized.toLowerCase()
+        : normalized;
+    };
+
+    const suffixes = includeVariants.map((candidate) =>
+      candidate.replace(/^(?:\\.\\.(?:\\\\|\\/))+/, "")
+    );
+    const matchingPaths = new Set<string>();
+
+    indexedPawnFiles.forEach((uri) => {
+      try {
+        if (!uri.startsWith("file:")) return;
+
+        const indexedPath = fileURLToPath(uri);
+        if (!isFile(indexedPath)) return;
+
+        const comparablePath = normalizeForComparison(indexedPath);
+        const matches = suffixes.some((suffix) => {
+          const comparableSuffix = normalizeForComparison(suffix);
+          return (
+            comparablePath === comparableSuffix ||
+            comparablePath.endsWith(path.sep + comparableSuffix)
+          );
+        });
+
+        if (matches) matchingPaths.add(path.resolve(indexedPath));
+      } catch {
+        // Ignore malformed or unsupported indexed URIs.
+      }
     });
 
-    if (!targetPath) return undefined;
+    const locations = Array.from(matchingPaths)
+      .sort()
+      .map((targetPath) =>
+        Location.create(pathToFileURL(targetPath).toString(), {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        })
+      );
 
-    const targetUri = pathToFileURL(targetPath).toString();
-    return Location.create(targetUri, {
-      start: { line: 0, character: 0 },
-      end: { line: 0, character: 0 },
-    });
+    if (locations.length === 1) return locations[0];
+    if (locations.length > 1) return locations;
+    return undefined;
   } catch {
     // Ignore unsupported document schemes and malformed or inaccessible paths.
     return undefined;
