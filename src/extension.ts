@@ -3,41 +3,12 @@ import * as vscode from "vscode";
 import * as VLC from "vscode-languageclient";
 
 let client: VLC.LanguageClient;
-let snippetCollection: Map<string, vscode.CompletionItem> = new Map();
-
-const initSnippetCollector = async () => {
-  snippetCollection.clear();
-
-  const filesPwn = await vscode.workspace.findFiles("**/*.pwn");
-  for (const key in filesPwn) {
-    if (filesPwn.hasOwnProperty(key)) {
-      const element = filesPwn[key];
-      await vscode.workspace.openTextDocument(element);
-    }
-  }
-  const filesInc = await vscode.workspace.findFiles("**/*.inc");
-  for (const key in filesInc) {
-    if (filesInc.hasOwnProperty(key)) {
-      const element = filesInc[key];
-      await vscode.workspace.openTextDocument(element);
-    }
-  }
-  
-  const filesPawn = await vscode.workspace.findFiles("**/*.pawn");
-  for (const key in filesPawn) {
-    if (filesPawn.hasOwnProperty(key)) {
-      const element = filesPawn[key];
-      await vscode.workspace.openTextDocument(element);
-    }
-  }
-};
 
 export async function activate(context: vscode.ExtensionContext) {
-  initSnippetCollector();
+  const serverModule = context.asAbsolutePath(join("out", "server", "server.js"));
+  const debugOptions = { execArgv: ["--nolazy", "--inspect=6009"] };
 
-  let serverModule = context.asAbsolutePath(join("out", "server", "server.js"));
-  let debugOptions = { execArgv: ["--nolazy", "--inspect=6009"] };
-  let serverOptions: VLC.ServerOptions = {
+  const serverOptions: VLC.ServerOptions = {
     run: { module: serverModule, transport: VLC.TransportKind.ipc },
     debug: {
       module: serverModule,
@@ -46,10 +17,11 @@ export async function activate(context: vscode.ExtensionContext) {
     },
   };
 
-  let clientOptions: VLC.LanguageClientOptions = {
+  const clientOptions: VLC.LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "pawn" }],
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/.pwn"),
+      // Watch Pawn files (the old pattern only matched a literal ".pwn" name).
+      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{p,pwn,pawn,inc}"),
     },
   };
 
@@ -60,12 +32,9 @@ export async function activate(context: vscode.ExtensionContext) {
     clientOptions
   );
 
-  client.start();
+  context.subscriptions.push(client.start());
 }
 
 export function deactivate(): Thenable<void> | undefined {
-  if (!client) {
-    return undefined;
-  }
-  return client.stop();
+  return client ? client.stop() : undefined;
 }
