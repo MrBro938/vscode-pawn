@@ -31,6 +31,7 @@ import { positionToIndex, findIdentifierAtCursor } from "./util";
 import {
   parseFunctions,
   functionTokens,
+  functionTokensByUri,
   findFunctionIdentifier,
 } from "./function";
 import { parseWords, wordTokens } from "./words";
@@ -158,6 +159,7 @@ const removeDocumentSymbols = (uri: string) => {
   functionTokens.forEach((value, key) => {
     if (value.uri === uri) functionTokens.delete(key);
   });
+  functionTokensByUri.delete(uri);
   wordTokens.delete(uri);
   definitionTokens.delete(uri);
 };
@@ -333,9 +335,10 @@ const buildCompletionItems = (uri: string): CompletionItem[] => {
     items.push(item);
   };
 
-  functionTokens.forEach((res) => add(res.completion));
-  definitionTokens.forEach((definitions) => {
-    definitions.forEach((res) => add(res.completion));
+  const visibleUris = getCompilationUnitUris(uri, includeGraph);
+  visibleUris.forEach((visibleUri) => {
+    functionTokensByUri.get(visibleUri)?.forEach((res) => add(res.completion));
+    definitionTokens.get(visibleUri)?.forEach((res) => add(res.completion));
   });
 
   const words = wordTokens.get(uri);
@@ -618,6 +621,32 @@ connection.onHover((params: TextDocumentPositionParams): Hover | undefined => {
   return doHover(doc, params.position);
 });
 
+const getFunctionInCompilationUnit = (
+  uri: string,
+  identifier: string
+) => {
+  const visibleUris = getCompilationUnitUris(uri, includeGraph);
+  for (const visibleUri of visibleUris) {
+    const found = functionTokensByUri.get(visibleUri)?.get(identifier);
+    if (found) return found;
+  }
+  return undefined;
+};
+
+const getDefinitionInCompilationUnit = (
+  uri: string,
+  identifier: string
+) => {
+  const visibleUris = getCompilationUnitUris(uri, includeGraph);
+  for (const visibleUri of visibleUris) {
+    const found = definitionTokens.get(visibleUri)?.find(
+      (definition) => definition.completion.label === identifier
+    );
+    if (found) return found;
+  }
+  return undefined;
+};
+
 const doHover = (
   document: TextDocument,
   position: Position
@@ -625,7 +654,7 @@ const doHover = (
   const content = document.getText();
   const cursorIndex = positionToIndex(content, position);
   const result = findIdentifierAtCursor(content, cursorIndex);
-  const snip = functionTokens.get(result.identifier);
+  const snip = getFunctionInCompilationUnit(document.uri, result.identifier);
 
   if (snip) {
     const contents: MarkedString[] = [];
@@ -636,12 +665,11 @@ const doHover = (
     return { contents };
   }
 
-  for (const definitions of definitionTokens.values()) {
-    const definition = definitions.find(
-      (item) => item.completion.label === result.identifier
-    );
-    if (definition) return { contents: [definition.completion.label] };
-  }
+  const definition = getDefinitionInCompilationUnit(
+    document.uri,
+    result.identifier
+  );
+  if (definition) return { contents: [definition.completion.label] };
 
   return undefined;
 };
@@ -663,7 +691,7 @@ const doSignHelp = (
   const result = findFunctionIdentifier(content, cursorIndex);
   if (result.identifier === "") return undefined;
 
-  const snip = functionTokens.get(result.identifier);
+  const snip = getFunctionInCompilationUnit(document.uri, result.identifier);
   if (!snip) return undefined;
 
   return {
@@ -759,15 +787,11 @@ const doGoToDef = (document: TextDocument, position: Position) => {
   const content = document.getText();
   const cursorIndex = positionToIndex(content, position);
   const result = findIdentifierAtCursor(content, cursorIndex);
-  const functionSymbol = functionTokens.get(result.identifier);
+  const functionSymbol = getFunctionInCompilationUnit(document.uri, result.identifier);
   if (functionSymbol) return functionSymbol.definition;
 
-  for (const definitions of definitionTokens.values()) {
-    const definition = definitions.find(
-      (item) => item.completion.label === result.identifier
-    );
-    if (definition) return definition.definition;
-  }
+  const definition = getDefinitionInCompilationUnit(document.uri, result.identifier);
+  if (definition) return definition.definition;
 
   return undefined;
 };
