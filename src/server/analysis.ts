@@ -262,7 +262,11 @@ export const analyzePawn = (text: string): PawnAnalysis => {
 
     let nameIndex = index + 1;
     let enumName: PawnToken | undefined;
-    if (tokens[nameIndex]?.kind === "identifier" && !isPunctuation(tokens[nameIndex + 1], "{")) {
+    if (
+      tokens[nameIndex]?.kind === "identifier" &&
+      (isPunctuation(tokens[nameIndex + 1], "{") ||
+        isPunctuation(tokens[nameIndex + 1], ":"))
+    ) {
       enumName = tokens[nameIndex];
       nameIndex++;
     }
@@ -331,6 +335,17 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     const keyword = tokens[index].value.toLowerCase();
     if (keyword !== "new" && keyword !== "static") continue;
     if (tokens[index].kind !== "identifier") continue;
+
+    // "static" can also be a function modifier. Do not parse the function
+    // header as a variable declaration.
+    if (
+      keyword === "static" &&
+      symbols.some((symbol) =>
+        symbol.kind === "function" &&
+        symbol.start > tokens[index].start &&
+        symbol.start < text.indexOf("\n", tokens[index].start) + 1
+      )
+    ) continue;
 
     const functionRegion = functions
       .filter((region) => tokens[index].start >= region.start && tokens[index].start <= region.end)
