@@ -4,36 +4,21 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 export let wordTokens: Map<string, CompletionItem[]> = new Map();
 
 export const parseWords = (textDocument: TextDocument) => {
-  const regex = /[A-Za-z_]+/gm;
+  const regex = /[A-Za-z_][A-Za-z0-9_]*/g;
   const content = textDocument.getText();
-  const splitContent = content.split("\n");
-  const words: string[] = [];
-  const wordCompletion: CompletionItem[] = [];
-  splitContent.forEach((cont: string, index: number) => {
-    var m;
-    do {
-      m = regex.exec(cont);
-      if (m) {
-        if (words.indexOf(m[0]) === -1) {
-          words.push(m[0]);
-        }
-      }
-    } while (m);
-  });
-  for (const key in words) {
-    if (words.hasOwnProperty(key)) {
-      const element = words[key];
-      const newSnip: CompletionItem = {
-        label: element,
-        kind: CompletionItemKind.Text,
-        insertText: element,
-      };
-      wordCompletion.push(newSnip);
-    }
+  const words = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(content)) !== null) {
+    words.add(match[0]);
   }
 
-  const findSnip = wordTokens.get(textDocument.uri);
-  if (findSnip === undefined) {
-    wordTokens.set(textDocument.uri, wordCompletion);
-  }
+  const wordCompletion: CompletionItem[] = Array.from(words, (word) => ({
+    label: word,
+    kind: CompletionItemKind.Text,
+    insertText: word,
+  }));
+
+  // Always replace the previous snapshot; this also removes deleted words.
+  wordTokens.set(textDocument.uri, wordCompletion);
 };
