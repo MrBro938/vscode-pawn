@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -28,8 +28,22 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Refresh dependency lockfile
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Commit refreshed lockfile
+        if: github.event_name == 'push' && github.ref == 'refs/heads/perf/completion-optimization'
+        run: |
+          if ! git diff --quiet -- package-lock.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add package-lock.json
+            git commit -m "chore: refresh dependency lockfile"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi
+
       - name: Install dependencies
-        run: npm install --ignore-scripts
+        run: npm ci --ignore-scripts
 
       - name: Compile TypeScript
         run: npm run compile
