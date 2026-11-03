@@ -29,7 +29,7 @@ const readAndIndexFile = async (uri: vscode.Uri, force = false) => {
 };
 
 const indexWorkspaceFiles = async () => {
-  const files = await vscode.workspace.findFiles(pawnGlob, excludedGlob, 5000);
+  const files = await vscode.workspace.findFiles(pawnGlob, excludedGlob);
 
   for (let offset = 0; offset < files.length; offset += INDEX_BATCH_SIZE) {
     const batch = files
@@ -103,7 +103,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument((document) => {
-      if (document.languageId === "pawn" && clientReady) {
+      if (
+        document.languageId === "pawn" &&
+        document.uri.scheme === "file" &&
+        clientReady
+      ) {
         // Restore the saved on-disk version after symbols from the editor buffer
         // have been removed by the language server's close event.
         setTimeout(() => readAndIndexFile(document.uri, true), 0);
