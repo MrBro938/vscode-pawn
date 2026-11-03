@@ -46,7 +46,7 @@ connection.onInitialize(() => ({
 
 const removeDocumentSymbols = (uri: string) => {
   functionTokens.forEach((value, key) => {
-    if (value.textDocument.uri === uri) functionTokens.delete(key);
+    if (value.uri === uri) functionTokens.delete(key);
   });
   wordTokens.delete(uri);
   definitionTokens.delete(uri);
@@ -83,8 +83,6 @@ documents.onDidClose((event) => {
   completionCache.clear();
 });
 
-// Workspace files are read in the extension host without opening editor documents.
-// They are indexed in small batches to keep the initial language-server load responsive.
 connection.onNotification(
   "pawn/indexFiles",
   (params: { files?: Array<{ uri: string; text: string }>; deleted?: string[] }) => {
@@ -125,7 +123,6 @@ const buildCompletionItems = (uri: string): CompletionItem[] => {
   };
 
   functionTokens.forEach((res) => add(res.completion));
-
   definitionTokens.forEach((definitions) => {
     definitions.forEach((res) => add(res.completion));
   });
@@ -141,9 +138,7 @@ connection.onCompletion((params: CompletionParams): CompletionList => {
   const items = buildCompletionItems(params.textDocument.uri);
   const document = documents.get(params.textDocument.uri);
 
-  if (!document) {
-    return { isIncomplete: false, items };
-  }
+  if (!document) return { isIncomplete: false, items };
 
   const offset = document.offsetAt(params.position);
   const prefixMatch = /[A-Za-z_][A-Za-z0-9_]*$/.exec(
@@ -151,8 +146,6 @@ connection.onCompletion((params: CompletionParams): CompletionList => {
   );
   const prefix = prefixMatch ? prefixMatch[0].toLowerCase() : "";
 
-  // Filtering before sending the response avoids returning thousands of unrelated
-  // project symbols on every keystroke.
   const filteredItems = prefix
     ? items.filter((item) => item.label.toLowerCase().startsWith(prefix))
     : items;
@@ -186,15 +179,11 @@ const doHover = (
     return { contents };
   }
 
-  // Preserve hover support for #define symbols, which were previously stored
-  // in the same lookup table as functions.
   for (const definitions of definitionTokens.values()) {
     const definition = definitions.find(
       (item) => item.completion.label === result.identifier
     );
-    if (definition) {
-      return { contents: [definition.completion.label] };
-    }
+    if (definition) return { contents: [definition.completion.label] };
   }
 
   return undefined;
