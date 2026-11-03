@@ -14,6 +14,8 @@ import {
   MarkedString,
   Position,
   Location,
+  DocumentSymbol,
+  SymbolKind,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import * as fs from "fs";
@@ -98,6 +100,7 @@ connection.onInitialize(() => ({
     textDocumentSync: TextDocumentSyncKind.Full,
     completionProvider: { resolveProvider: true },
     definitionProvider: true,
+    documentSymbolProvider: true,
     hoverProvider: true,
     signatureHelpProvider: { triggerCharacters: ["(", ","] },
   },
@@ -179,6 +182,68 @@ connection.onNotification(
 
 connection.onDidChangeConfiguration(() => {
   documents.all().forEach(scheduleCollectSymbols);
+});
+
+const getDocumentSymbols = (document: TextDocument): DocumentSymbol[] => {
+  const lines = document.getText().split(/\r?\n/);
+  const symbols: DocumentSymbol[] = [];
+  const functionPattern = /^\s*(?:(?:public|stock|static|native|forward)\s+)*(?:[A-Za-z_][A-Za-z0-9_]*:\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/i;
+  const definePattern = /^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)/i;
+  const excludedNames = new Set([
+    "if", "else", "while", "for", "do", "switch", "case", "return",
+    "sizeof", "state", "new", "delete", "assert", "exit", "break",
+    "continue", "goto"
+  ]);
+
+  lines.forEach((line, lineNumber) => {
+    const defineMatch = definePattern.exec(line);
+    if (defineMatch) {
+      const name = defineMatch[1];
+      const character = line.indexOf(name);
+      symbols.push({
+        name,
+        detail: "#define",
+        kind: SymbolKind.Constant,
+        range: {
+          start: { line: lineNumber, character: 0 },
+          end: { line: lineNumber, character: line.length },
+        },
+        selectionRange: {
+          start: { line: lineNumber, character },
+          end: { line: lineNumber, character: character + name.length },
+        },
+      });
+      return;
+    }
+
+    const functionMatch = functionPattern.exec(line);
+    if (!functionMatch) return;
+
+    const name = functionMatch[1];
+    if (excludedNames.has(name.toLowerCase())) return;
+
+    const character = line.indexOf(name, functionMatch.index);
+    symbols.push({
+      name,
+      detail: line.trim(),
+      kind: SymbolKind.Function,
+      range: {
+        start: { line: lineNumber, character: 0 },
+        end: { line: lineNumber, character: line.length },
+      },
+      selectionRange: {
+        start: { line: lineNumber, character },
+        end: { line: lineNumber, character: character + name.length },
+      },
+    });
+  });
+
+  return symbols;
+};
+
+connection.onDocumentSymbol((params) => {
+  const document = documents.get(params.textDocument.uri);
+  return document ? getDocumentSymbols(document) : [];
 });
 
 const buildCompletionItems = (uri: string): CompletionItem[] => {
