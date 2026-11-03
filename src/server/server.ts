@@ -28,11 +28,12 @@ import { definitionTokens, parseDefinitions } from "./definition";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
-documents.listen(connection);
 
 const PARSE_DEBOUNCE_MS = 150;
 const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
 const completionCache = new Map<string, CompletionItem[]>();
+
+documents.listen(connection);
 
 connection.onInitialize(() => ({
   capabilities: {
@@ -52,6 +53,14 @@ const removeDocumentSymbols = (uri: string) => {
   definitionTokens.delete(uri);
 };
 
+const collectSymbols = (textDocument: TextDocument, includeWords = true) => {
+  removeDocumentSymbols(textDocument.uri);
+  parseDefinitions(textDocument);
+  parseFunctions(textDocument);
+  if (includeWords) parseWords(textDocument);
+  completionCache.clear();
+};
+
 const scheduleCollectSymbols = (textDocument: TextDocument) => {
   const uri = textDocument.uri;
   const pending = pendingParses.get(uri);
@@ -59,11 +68,7 @@ const scheduleCollectSymbols = (textDocument: TextDocument) => {
 
   const timer = setTimeout(() => {
     pendingParses.delete(uri);
-    removeDocumentSymbols(uri);
-    parseDefinitions(textDocument);
-    parseFunctions(textDocument);
-    parseWords(textDocument);
-    completionCache.clear();
+    collectSymbols(textDocument);
   }, PARSE_DEBOUNCE_MS);
 
   pendingParses.set(uri, timer);
@@ -83,10 +88,28 @@ connection.onDidChangeConfiguration(() => {
   documents.all().forEach(scheduleCollectSymbols);
 });
 
-connection.onDidChangeWatchedFiles(() => {
-  // Workspace file changes are observed by the client. Open documents are
-  // indexed from their in-memory text; unopened files are not eagerly loaded.
-});
+// Workspace files are read in the extension host without opening editor documents.
+// They are indexed in small batches to keep the initial language-server load responsive.
+connection.onNotification(
+  "pawn/indexFiles",
+  (params: { files?: Array<{ uri: string; text: string }>; deleted?: string[] }) => {
+    if (params.deleted) {
+      params.deleted.forEach((uri) => removeDocumentSymbols(uri));
+    }
+
+    if (params.files) {
+      params.files.forEach((file) => {
+        const document = TextDocument.create(file.uri, "pawn", 1, file.text);
+        collectSymbols(document, false);
+      });
+    }
+
+    if ((params.deleted && params.deleted.length > 0) ||
+        (params.files && params.files.length > 0)) {
+      completionCache.clear();
+    }
+  }
+);
 
 const buildCompletionItems = (uri: string): CompletionItem[] => {
   const cached = completionCache.get(uri);
@@ -115,10 +138,28 @@ const buildCompletionItems = (uri: string): CompletionItem[] => {
   return items;
 };
 
-connection.onCompletion((params: CompletionParams): CompletionList => ({
-  isIncomplete: false,
-  items: buildCompletionItems(params.textDocument.uri),
-}));
+connection.onCompletion((params: CompletionParams): CompletionList => {
+  const items = buildCompletionItems(params.textDocument.uri);
+  const document = documents.get(params.textDocument.uri);
+
+  if (!document) {
+    return { isIncomplete: false, items };
+  }
+
+  const offset = document.offsetAt(params.position);
+  const prefixMatch = /[A-Za-z_][A-Za-z0-9_]*$/.exec(
+    document.getText().slice(0, offset)
+  );
+  const prefix = prefixMatch ? prefixMatch[0].toLowerCase() : "";
+
+  // Filtering before sending the response avoids returning thousands of unrelated
+  // project symbols on every keystroke.
+  const filteredItems = prefix
+    ? items.filter((item) => item.label.toLowerCase().startsWith(prefix))
+    : items;
+
+  return { isIncomplete: false, items: filteredItems };
+});
 
 connection.onCompletionResolve((item: CompletionItem): CompletionItem => item);
 
