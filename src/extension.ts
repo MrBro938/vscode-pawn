@@ -124,11 +124,10 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  client.start();
-  client.onReady().then(async () => {
+  client.start().then(async () => {
     clientReady = true;
     await indexWorkspaceFiles();
-  }).catch((error) => {
+  }).catch((error: Error) => {
     console.error("[Pawn Tools] Language server failed to start", error);
   });
 }
