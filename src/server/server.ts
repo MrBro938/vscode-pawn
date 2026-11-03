@@ -44,6 +44,12 @@ import {
   PawnSymbol,
   resolvePawnSymbol,
 } from "./analysis";
+import {
+  buildPawnIncludeGraph,
+  getCompilationUnitUris,
+  PawnIncludeGraph,
+  resolveIncludeUris,
+} from "./includeGraph";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -58,13 +64,22 @@ const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>(
 const indexedPawnFiles = new Map<string, string>();
 const indexedPawnTexts = new Map<string, string>();
 const includePathIndex = new Map<string, Set<string>>();
+let includeGraph: PawnIncludeGraph = new Map();
+
+const rebuildIncludeGraph = () => {
+  includeGraph = buildPawnIncludeGraph(
+    indexedPawnFiles,
+    indexedPawnTexts,
+    includePathIndex
+  );
+};
 
 const normalizeIndexPath = (value: string) => {
   const normalized = path.normalize(value);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 };
 
-const indexPawnFile = (uri: string, text?: string) => {
+const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
   if (!uri.startsWith("file:")) return;
 
   try {
@@ -85,12 +100,14 @@ const indexPawnFile = (uri: string, text?: string) => {
       }
       matches.add(uri);
     }
+
+    if (rebuildGraph) rebuildIncludeGraph();
   } catch {
     // Ignore malformed or unsupported URIs.
   }
 };
 
-const unindexPawnFile = (uri: string) => {
+const unindexPawnFile = (uri: string, rebuildGraph = true) => {
   const filePath = indexedPawnFiles.get(uri);
   if (!filePath) return;
 
@@ -109,6 +126,8 @@ const unindexPawnFile = (uri: string) => {
     matches.delete(uri);
     if (matches.size === 0) includePathIndex.delete(key);
   }
+
+  if (rebuildGraph) rebuildIncludeGraph();
 };
 
 documents.listen(connection);
@@ -195,7 +214,7 @@ connection.onNotification(
   (params: { files?: Array<{ uri: string; text: string }>; deleted?: string[] }) => {
     if (params.deleted) {
       params.deleted.forEach((uri) => {
-        unindexPawnFile(uri);
+        unindexPawnFile(uri, false);
         analysisCache.delete(uri);
         removeDocumentSymbols(uri);
       });
@@ -203,7 +222,7 @@ connection.onNotification(
 
     if (params.files) {
       params.files.forEach((file) => {
-        indexPawnFile(file.uri, file.text);
+        indexPawnFile(file.uri, file.text, false);
         const document = TextDocument.create(file.uri, "pawn", 1, file.text);
         collectSymbols(document, false);
       });
@@ -211,6 +230,7 @@ connection.onNotification(
 
     if ((params.deleted && params.deleted.length > 0) ||
         (params.files && params.files.length > 0)) {
+      rebuildIncludeGraph();
       completionCache.clear();
     }
   }
@@ -375,12 +395,17 @@ interface WorkspacePawnAnalysis {
   analysis: PawnAnalysis;
 }
 
-const getWorkspaceAnalyses = (): WorkspacePawnAnalysis[] => {
+const getWorkspaceAnalyses = (sourceUri?: string): WorkspacePawnAnalysis[] => {
   const uris = new Set<string>(indexedPawnFiles.keys());
   documents.all().forEach((document) => uris.add(document.uri));
 
+  const visibleUris = sourceUri
+    ? getCompilationUnitUris(sourceUri, includeGraph)
+    : uris;
+
   const result: WorkspacePawnAnalysis[] = [];
-  uris.forEach((uri) => {
+  visibleUris.forEach((uri) => {
+    if (!uris.has(uri) && uri !== sourceUri) return;
     const analysis = getAnalysis(uri);
     if (analysis) result.push({ uri, analysis });
   });
@@ -395,7 +420,7 @@ const resolveSymbolAt = (
   const currentAnalysis = getAnalysis(uri);
   if (!currentAnalysis) return undefined;
 
-  const workspace = getWorkspaceAnalyses();
+  const workspace = getWorkspaceAnalyses(uri);
   const symbol = resolvePawnSymbol(
     currentAnalysis,
     uri,
@@ -495,7 +520,7 @@ connection.languages.semanticTokens.on((params) => {
   const analysis = getAnalysis(document.uri);
   if (!analysis) return { data: [] };
 
-  const workspace = getWorkspaceAnalyses();
+  const workspace = getWorkspaceAnalyses(document.uri);
   const projectKinds = new Map<string, PawnSymbol["kind"]>();
   workspace.forEach((entry) => {
     entry.analysis.symbols.forEach((symbol) => {
@@ -676,77 +701,19 @@ const resolveIncludeDefinition = (
   try {
     if (!document.uri.startsWith("file:")) return undefined;
 
-    const sourceFile = fileURLToPath(document.uri);
-    const normalizedIncludePath = path.normalize(
-      includePath.replace(/[\\/]+/g, path.sep)
+    const matchingUris = resolveIncludeUris(
+      document.uri,
+      includePath,
+      indexedPawnFiles,
+      includePathIndex
     );
 
-    const includeVariants = [normalizedIncludePath];
-    if (!path.extname(normalizedIncludePath)) {
-      includeVariants.push(
-        normalizedIncludePath + ".inc",
-        normalizedIncludePath + ".pwn",
-        normalizedIncludePath + ".pawn",
-        normalizedIncludePath + ".p"
-      );
-    }
-
-    // Preserve the original relative-to-current-file behavior as the first
-    // choice. This also supports explicit relative paths such as ../shared/file.
-    const directCandidates = includeVariants.map((candidate) =>
-      path.isAbsolute(candidate)
-        ? path.normalize(candidate)
-        : path.resolve(path.dirname(sourceFile), candidate)
-    );
-
-    const isFile = (candidate: string) => {
-      try {
-        return fs.statSync(candidate).isFile();
-      } catch {
-        return false;
-      }
-    };
-
-    const directTarget = directCandidates.find(isFile);
-    if (directTarget) {
-      return Location.create(pathToFileURL(directTarget).toString(), {
+    const locations = matchingUris.map((uri) =>
+      Location.create(uri, {
         start: { line: 0, character: 0 },
         end: { line: 0, character: 0 },
-      });
-    }
-
-    // Module includes are often written relative to a project/module root,
-    // not relative to the file containing the #include. Search the workspace
-    // index by path suffix so the including file can live in any subdirectory.
-    const matchingUris = new Set<string>();
-
-    includeVariants.forEach((candidate) => {
-      const parts = candidate.split(path.sep);
-      while (parts.length > 0 && (parts[0] === ".." || parts[0] === ".")) {
-        parts.shift();
-      }
-
-      const suffix = parts.join(path.sep);
-      if (!suffix) return;
-
-      const matches = includePathIndex.get(normalizeIndexPath(suffix));
-      if (matches) matches.forEach((uri) => matchingUris.add(uri));
-    });
-
-    const locations = Array.from(matchingUris)
-      .map((uri) => indexedPawnFiles.get(uri))
-      .filter((targetPath): targetPath is string =>
-        targetPath !== undefined && isFile(targetPath)
-      )
-      .map((targetPath) => path.resolve(targetPath))
-      .filter((targetPath, index, all) => all.indexOf(targetPath) === index)
-      .sort()
-      .map((targetPath) =>
-        Location.create(pathToFileURL(targetPath).toString(), {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        })
-      );
+      })
+    );
 
     if (locations.length === 1) return locations[0];
     if (locations.length > 1) return locations;
