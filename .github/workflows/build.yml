@@ -1,0 +1,46 @@
+name: Build Pawn Tools
+
+on:
+  push:
+    branches:
+      - master
+      - perf/completion-optimization
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compile and package VSIX
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Package VS Code extension
+        run: npx --yes @vscode/vsce package --out Pawn-Tools.vsix
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pawn-Tools
+          path: Pawn-Tools.vsix
+          if-no-files-found: error
+          retention-days: 1
