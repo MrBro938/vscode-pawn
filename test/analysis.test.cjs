@@ -27,6 +27,8 @@ const source = [
   "public OnPlayerDisconnect(playerid) {",
   "    new localValue;",
   "    localValue = 0;",
+  "    new g_Total;",
+  "    g_Total = 10;",
   "}"
 ].join("\n");
 
@@ -70,6 +72,27 @@ assert.equal(nestedOccurrences.length, 2, "nested block local should only bind w
 const typeOffset = source.indexOf("E_PLAYER:g_Player") + 2;
 const resolvedType = resolvePawnSymbol(analysis, uri, typeOffset, [analysis]);
 assert.equal(resolvedType.kind, "type", "enum tags should resolve in Pawn tag annotations");
+
+const otherUri = "file:///workspace/gamemodes/other.pwn";
+const otherAnalysis = analyzePawn([
+  "public ReadTotal() {",
+  "    printf(\"%d\", g_Total);",
+  "}"
+].join("\n"));
+const globalTotal = find("g_Total", "global");
+const globalOccurrences = getBoundOccurrences(
+  globalTotal,
+  uri,
+  [
+    { uri, analysis },
+    { uri: otherUri, analysis: otherAnalysis }
+  ]
+);
+assert.equal(
+  globalOccurrences.length,
+  3,
+  "global references should cross files but ignore a same-named local shadow"
+);
 
 const parameter = find("playerid", "parameter");
 assert.ok(parameter, "function parameter should be indexed");
