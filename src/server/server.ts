@@ -24,104 +24,107 @@ import {
   findFunctionIdentifier,
 } from "./function";
 import { parseWords, wordTokens } from "./words";
-import { parseDefinitions } from "./definition";
-
-// -
-// Initialisation
-// -
+import { definitionTokens, parseDefinitions } from "./definition";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 documents.listen(connection);
-connection.listen();
 
-connection.onInitialize(() => {
-  return {
-    capabilities: {
-      textDocumentSync: TextDocumentSyncKind.Full,
-      // Tell the client that the server supports code completion
-      completionProvider: {
-        resolveProvider: true,
-      },
-      definitionProvider: true,
-      hoverProvider: true,
-      signatureHelpProvider: {
-        triggerCharacters: ["(", ","],
-      },
-    },
-  };
+const PARSE_DEBOUNCE_MS = 150;
+const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
+const completionCache = new Map<string, CompletionItem[]>();
+
+connection.onInitialize(() => ({
+  capabilities: {
+    textDocumentSync: TextDocumentSyncKind.Full,
+    completionProvider: { resolveProvider: true },
+    definitionProvider: true,
+    hoverProvider: true,
+    signatureHelpProvider: { triggerCharacters: ["(", ","] },
+  },
+}));
+
+const removeDocumentSymbols = (uri: string) => {
+  functionTokens.forEach((value, key) => {
+    if (value.textDocument.uri === uri) functionTokens.delete(key);
+  });
+  wordTokens.delete(uri);
+  definitionTokens.delete(uri);
+};
+
+const scheduleCollectSymbols = (textDocument: TextDocument) => {
+  const uri = textDocument.uri;
+  const pending = pendingParses.get(uri);
+  if (pending) clearTimeout(pending);
+
+  const timer = setTimeout(() => {
+    pendingParses.delete(uri);
+    removeDocumentSymbols(uri);
+    parseDefinitions(textDocument);
+    parseFunctions(textDocument);
+    parseWords(textDocument);
+    completionCache.clear();
+  }, PARSE_DEBOUNCE_MS);
+
+  pendingParses.set(uri, timer);
+};
+
+documents.onDidOpen((change) => scheduleCollectSymbols(change.document));
+documents.onDidChangeContent((change) => scheduleCollectSymbols(change.document));
+documents.onDidClose((event) => {
+  const pending = pendingParses.get(event.document.uri);
+  if (pending) clearTimeout(pending);
+  pendingParses.delete(event.document.uri);
+  removeDocumentSymbols(event.document.uri);
+  completionCache.clear();
 });
-
-// -
-// Symbol Collection
-// -
 
 connection.onDidChangeConfiguration(() => {
-  documents.all().forEach(collectSymbols);
-});
-documents.onDidChangeContent((change) => {
-  collectSymbols(change.document);
+  documents.all().forEach(scheduleCollectSymbols);
 });
 
-const collectSymbols = async (textDocument: TextDocument) => {
-  // TODO: move to function parser class
-  functionTokens.forEach((value: PawnFunction, key: string) => {
-    if (value.textDocument.uri === textDocument.uri) {
-      functionTokens.delete(key);
-    }
+connection.onDidChangeWatchedFiles(() => {
+  // Workspace file changes are observed by the client. Open documents are
+  // indexed from their in-memory text; unopened files are not eagerly loaded.
+});
+
+const buildCompletionItems = (uri: string): CompletionItem[] => {
+  const cached = completionCache.get(uri);
+  if (cached) return cached;
+
+  const items: CompletionItem[] = [];
+  const seen = new Set<string>();
+
+  const add = (item: CompletionItem) => {
+    const key = item.label;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  };
+
+  functionTokens.forEach((res) => add(res.completion));
+
+  definitionTokens.forEach((definitions) => {
+    definitions.forEach((res) => add(res.completion));
   });
 
-  // TODO: also move this global state mess elsewhere...
-  const findSnip = wordTokens.get(textDocument.uri);
-  if (findSnip !== undefined) {
-    wordTokens.delete(textDocument.uri);
-  }
+  const words = wordTokens.get(uri);
+  if (words) words.forEach(add);
 
-  parseDefinitions(textDocument);
-  parseFunctions(textDocument);
-  parseWords(textDocument);
-};
-connection.onDidChangeWatchedFiles((_change) => {});
-
-// -
-// Completion
-// -
-
-connection.onCompletion(async (params: CompletionParams) => {
-  const c: CompletionList = {
-    isIncomplete: false,
-    items: await doCompletion(params),
-  };
-  return c;
-});
-
-const doCompletion = async (params: CompletionParams) => {
-  const comItems: CompletionItem[] = [];
-  functionTokens.forEach((res) => comItems.push(res.completion));
-  const findSnip = wordTokens.get(params.textDocument.uri);
-  if (findSnip !== undefined) {
-    findSnip.forEach((res) => comItems.push(res));
-  }
-  return comItems;
+  completionCache.set(uri, items);
+  return items;
 };
 
-connection.onCompletionResolve(
-  async (item: CompletionItem): Promise<CompletionItem> => {
-    return await doCompletionResolve(item);
-  }
-);
+connection.onCompletion((params: CompletionParams): CompletionList => ({
+  isIncomplete: false,
+  items: buildCompletionItems(params.textDocument.uri),
+}));
 
-const doCompletionResolve = async (item: CompletionItem) => {
-  return item;
-};
-
-// -
-// Hover
-// -
+connection.onCompletionResolve((item: CompletionItem): CompletionItem => item);
 
 connection.onHover((params: TextDocumentPositionParams): Hover | undefined => {
   const doc = documents.get(params.textDocument.uri);
-  if (doc === undefined) return;
+  if (!doc) return undefined;
   return doHover(doc, params.position);
 });
 
@@ -129,38 +132,27 @@ const doHover = (
   document: TextDocument,
   position: Position
 ): Hover | undefined => {
-  const cursorIndex = positionToIndex(document.getText(), position);
-  const result = findIdentifierAtCursor(document.getText(), cursorIndex);
+  const content = document.getText();
+  const cursorIndex = positionToIndex(content, position);
+  const result = findIdentifierAtCursor(content, cursorIndex);
   const snip = functionTokens.get(result.identifier);
 
-  if (snip === undefined) {
-    return undefined;
-  }
+  if (!snip) return undefined;
 
-  let c: MarkedString[] = [];
-
-  if (snip.completion.label !== undefined) {
-    c.push(`${snip.completion.label}`);
-  }
-
+  const contents: MarkedString[] = [];
+  if (snip.completion.label !== undefined) contents.push(snip.completion.label);
   if (snip.completion.documentation !== undefined) {
-    c.push(`${snip.completion.documentation}`);
+    contents.push(String(snip.completion.documentation));
   }
 
-  return {
-    contents: c,
-  };
+  return { contents };
 };
-
-// -
-// Call Signature Help
-// -
 
 connection.onSignatureHelp((params: SignatureHelpParams):
   | SignatureHelp
   | undefined => {
   const doc = documents.get(params.textDocument.uri);
-  if (doc === undefined) return;
+  if (!doc) return undefined;
   return doSignHelp(doc, params.position);
 });
 
@@ -168,42 +160,44 @@ const doSignHelp = (
   document: TextDocument,
   position: Position
 ): SignatureHelp | undefined => {
-  const cursorIndex = positionToIndex(document.getText(), position);
-  const result = findFunctionIdentifier(document.getText(), cursorIndex);
+  const content = document.getText();
+  const cursorIndex = positionToIndex(content, position);
+  const result = findFunctionIdentifier(content, cursorIndex);
   if (result.identifier === "") return undefined;
+
   const snip = functionTokens.get(result.identifier);
-  if (snip === undefined) return undefined;
-  let c: MarkedString[] = [];
-  if (snip.completion.label !== undefined) c.push(`# ${snip.completion.label}`);
-  if (snip.completion.documentation !== undefined)
-    c.push(`${snip.completion.documentation}`);
+  if (!snip) return undefined;
+
   return {
-    activeParameter: 0,
+    activeParameter: Math.min(result.parameterIndex, Math.max(0, (snip.params || []).length - 1)),
     activeSignature: 0,
-    signatures: [
-      {
-        label: snip.completion.label,
-        parameters: snip.params,
-        documentation: snip.completion.documentation,
-      },
-    ],
+    signatures: [{
+      label: snip.completion.label || result.identifier,
+      parameters: snip.params,
+      documentation: snip.completion.documentation,
+    }],
   };
 };
 
-// -
-// Go To Definition
-// -
-
-connection.onDefinition((textDocumentIdentifier: DefinitionParams) => {
-  const doc = documents.get(textDocumentIdentifier.textDocument.uri);
-  if (doc === undefined) return;
-  return doGoToDef(doc, textDocumentIdentifier.position);
+connection.onDefinition((params: DefinitionParams) => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return undefined;
+  return doGoToDef(doc, params.position);
 });
 
 const doGoToDef = (document: TextDocument, position: Position) => {
-  const cursorIndex = positionToIndex(document.getText(), position);
-  const result = findIdentifierAtCursor(document.getText(), cursorIndex);
-  const snip = functionTokens.get(result.identifier);
-  if (snip === undefined) return;
-  return snip.definition;
+  const content = document.getText();
+  const cursorIndex = positionToIndex(content, position);
+  const result = findIdentifierAtCursor(content, cursorIndex);
+  const functionSymbol = functionTokens.get(result.identifier);
+  if (functionSymbol) return functionSymbol.definition;
+
+  for (const definitions of definitionTokens.values()) {
+    const definition = definitions.find((item) => item.completion.label === result.identifier);
+    if (definition) return definition.definition;
+  }
+
+  return undefined;
 };
+
+connection.listen();
