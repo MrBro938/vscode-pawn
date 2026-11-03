@@ -1,0 +1,105 @@
+const assert = require("node:assert/strict");
+const path = require("node:path");
+
+const {
+  buildPawnIncludeGraph,
+  extractPawnIncludes,
+  getCompilationUnitUris,
+  resolveIncludeUris
+} = require("../out/server/includeGraph.js");
+
+const rootA = "file:///workspace/gamemodes/mode_a.pwn";
+const rootB = "file:///workspace/gamemodes/mode_b.pwn";
+const apiA = "file:///workspace/sourse/modules/a/public/api.inc";
+const sideA = "file:///workspace/sourse/modules/a/private/side.inc";
+const apiB = "file:///workspace/sourse/modules/b/public/api.inc";
+const common = "file:///workspace/sourse/shared/common.inc";
+
+const files = new Map([
+  [rootA, "/workspace/gamemodes/mode_a.pwn"],
+  [rootB, "/workspace/gamemodes/mode_b.pwn"],
+  [apiA, "/workspace/sourse/modules/a/public/api.inc"],
+  [sideA, "/workspace/sourse/modules/a/private/side.inc"],
+  [apiB, "/workspace/sourse/modules/b/public/api.inc"],
+  [common, "/workspace/sourse/shared/common.inc"]
+]);
+
+const texts = new Map([
+  [rootA, [
+    '#include "sourse/modules/a/public/api.inc"',
+    '#include "sourse/modules/a/private/side.inc"',
+    "public OnGameModeInit() {}"
+  ].join("\n")],
+  [rootB, [
+    '#include "sourse/modules/b/public/api.inc"',
+    "public OnGameModeInit() {}"
+  ].join("\n")],
+  [apiA, [
+    '#include "sourse/shared/common.inc"',
+    "stock GetModuleValue() { return 1; }"
+  ].join("\n")],
+  [sideA, "stock GetSideValue() { return 2; }"],
+  [apiB, "stock GetModuleValue() { return 3; }"],
+  [common, "stock GetCommonValue() { return 4; }"]
+]);
+
+const pathIndex = new Map();
+files.forEach((filePath, uri) => {
+  const parts = filePath.split(path.sep);
+  for (let index = 0; index < parts.length; index++) {
+    const suffix = path.normalize(parts.slice(index).join(path.sep));
+    if (!suffix) continue;
+    let matches = pathIndex.get(suffix);
+    if (!matches) {
+      matches = new Set();
+      pathIndex.set(suffix, matches);
+    }
+    matches.add(uri);
+  }
+});
+
+const includes = extractPawnIncludes([
+  "// #include \"commented.inc\"",
+  "/*",
+  '#include "inside_multiline_comment.inc"',
+  "*/",
+  '#include "real.inc" // trailing comment',
+  '#include <standard.inc>'
+].join("\n"));
+assert.deepEqual(
+  includes,
+  ["real.inc", "standard.inc"],
+  "only active include directives should be parsed"
+);
+
+const graph = buildPawnIncludeGraph(files, texts, pathIndex);
+const unitA = getCompilationUnitUris(rootA, graph);
+const unitB = getCompilationUnitUris(rootB, graph);
+
+for (const uri of [rootA, apiA, sideA, common]) {
+  assert.ok(unitA.has(uri), "mode A compilation unit should include " + uri);
+}
+assert.ok(!unitA.has(rootB), "mode A must not include independent mode B root");
+assert.ok(!unitA.has(apiB), "same-named symbols in mode B modules must stay isolated");
+
+for (const uri of [rootB, apiB]) {
+  assert.ok(unitB.has(uri), "mode B compilation unit should include " + uri);
+}
+assert.ok(!unitB.has(apiA), "mode B must not include mode A's module");
+
+const resolved = resolveIncludeUris(
+  rootA,
+  "sourse/modules/a/public/api.inc",
+  files,
+  pathIndex
+);
+assert.deepEqual(resolved, [apiA], "project-root include path should resolve to the indexed module");
+
+const isolated = getCompilationUnitUris("file:///workspace/other/isolated.pwn", graph);
+assert.deepEqual(
+  Array.from(isolated),
+  ["file:///workspace/other/isolated.pwn"],
+  "an unindexed standalone file should form its own compilation unit"
+);
+
+console.log("Pawn include graph tests passed.");
