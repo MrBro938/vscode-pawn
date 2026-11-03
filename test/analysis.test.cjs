@@ -13,11 +13,16 @@ const source = [
   "    E_ID,",
   "    E_NAME[24]",
   "}",
+  "new E_PLAYER:g_Player;",
   "forward TestNative(playerid);",
   "public OnPlayerConnect(playerid) {",
   "    new localValue;",
   "    localValue = g_Total;",
-  "    printf(\"%d\", localValue);",
+  "    printf(\"localValue %d\", localValue); // localValue is only a comment",
+  "    {",
+  "        new localValue;",
+  "        localValue = 2;",
+  "    }",
   "}",
   "public OnPlayerDisconnect(playerid) {",
   "    new localValue;",
@@ -40,7 +45,7 @@ assert.equal(find("E_NAME", "enumMember").isArray, true, "enum array member shou
 const localDeclarations = analysis.symbols.filter(
   (symbol) => symbol.name === "localValue" && symbol.kind === "local"
 );
-assert.equal(localDeclarations.length, 2, "same-named locals in separate functions should remain separate symbols");
+assert.equal(localDeclarations.length, 3, "locals in function and nested block scopes should be indexed separately");
 
 const firstLocal = localDeclarations[0];
 const firstUseOffset = source.indexOf("localValue = g_Total") + 2;
@@ -48,11 +53,23 @@ const resolved = resolvePawnSymbol(analysis, uri, firstUseOffset, [analysis]);
 assert.equal(resolved, firstLocal, "local reference should resolve to the declaration in its own function");
 
 const occurrences = getBoundOccurrences(firstLocal, uri, [{ uri, analysis }]);
-assert.equal(occurrences.length, 3, "local references should include the declaration and uses, but not cross into the second function");
+assert.equal(occurrences.length, 3, "outer local references should exclude the nested block and second function");
 assert.ok(
   occurrences.every(({ token }) => token.start >= firstLocal.start && token.start < firstLocal.scopeEnd),
   "local references should stay inside the declaration's scope"
 );
+
+const nestedLocal = localDeclarations[1];
+const nestedOccurrences = getBoundOccurrences(
+  nestedLocal,
+  uri,
+  [{ uri, analysis }]
+);
+assert.equal(nestedOccurrences.length, 2, "nested block local should only bind within its block");
+
+const typeOffset = source.indexOf("E_PLAYER:g_Player") + 2;
+const resolvedType = resolvePawnSymbol(analysis, uri, typeOffset, [analysis]);
+assert.equal(resolvedType.kind, "type", "enum tags should resolve in Pawn tag annotations");
 
 const parameter = find("playerid", "parameter");
 assert.ok(parameter, "function parameter should be indexed");
