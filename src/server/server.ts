@@ -36,7 +36,14 @@ import {
 } from "./function";
 import { parseWords, wordTokens } from "./words";
 import { definitionTokens, parseDefinitions } from "./definition";
-import { findPawnIdentifierAt, findPawnIdentifierOccurrences, tokenizePawn } from "./symbols";
+import { tokenizePawn } from "./symbols";
+import {
+  analyzePawn,
+  getBoundOccurrences,
+  PawnAnalysis,
+  PawnSymbol,
+  resolvePawnSymbol,
+} from "./analysis";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -44,6 +51,7 @@ const documents = new TextDocuments(TextDocument);
 const PARSE_DEBOUNCE_MS = 150;
 const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
 const completionCache = new Map<string, CompletionItem[]>();
+const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>();
 
 // Workspace include index. Each path suffix points to all matching files,
 // allowing includes to resolve independently of the including file's directory.
@@ -117,7 +125,10 @@ connection.onInitialize(() => ({
     renameProvider: true,
     semanticTokensProvider: {
       legend: {
-        tokenTypes: ["keyword", "function", "macro", "variable", "number", "string", "comment"],
+        tokenTypes: [
+          "keyword", "function", "macro", "variable", "parameter",
+          "enum", "enumMember", "type", "number", "string", "comment"
+        ],
         tokenModifiers: ["declaration"],
       },
       full: true,
@@ -138,6 +149,10 @@ const collectSymbols = (textDocument: TextDocument, includeWords = true) => {
   parseDefinitions(textDocument);
   parseFunctions(textDocument);
   if (includeWords) parseWords(textDocument);
+  analysisCache.set(textDocument.uri, {
+    text: textDocument.getText(),
+    analysis: analyzePawn(textDocument.getText()),
+  });
   completionCache.clear();
 };
 
@@ -162,7 +177,7 @@ documents.onDidOpen((change) => {
 });
 documents.onDidChangeContent((change) => {
   if (change.document.uri.startsWith("file:")) {
-    indexPawnFile(change.document.uri);
+    indexPawnFile(change.document.uri, change.document.getText());
   }
   scheduleCollectSymbols(change.document);
 });
@@ -171,6 +186,7 @@ documents.onDidClose((event) => {
   if (pending) clearTimeout(pending);
   pendingParses.delete(event.document.uri);
   removeDocumentSymbols(event.document.uri);
+  analysisCache.delete(event.document.uri);
   completionCache.clear();
 });
 
@@ -180,6 +196,7 @@ connection.onNotification(
     if (params.deleted) {
       params.deleted.forEach((uri) => {
         unindexPawnFile(uri);
+        analysisCache.delete(uri);
         removeDocumentSymbols(uri);
       });
     }
@@ -315,7 +332,7 @@ const pawnKeywords = new Set([
   "return", "break", "continue", "goto", "new", "const", "static",
   "public", "stock", "native", "forward", "enum", "sizeof", "state",
   "true", "false", "defined", "operator", "assert", "exit", "sleep",
-  "tagof", "and", "or", "not"
+  "tagof", "and", "or", "not", "decl", "char", "bool"
 ]);
 
 const getDocumentText = (uri: string): string | undefined => {
@@ -323,71 +340,84 @@ const getDocumentText = (uri: string): string | undefined => {
   return openDocument ? openDocument.getText() : indexedPawnTexts.get(uri);
 };
 
-const isProjectSymbol = (name: string): boolean => {
-  if (functionTokens.has(name)) return true;
-  for (const definitions of definitionTokens.values()) {
-    if (definitions.some((definition) => definition.completion.label === name)) {
-      return true;
-    }
-  }
-  return false;
+const getAnalysis = (uri: string): PawnAnalysis | undefined => {
+  const text = getDocumentText(uri);
+  if (text === undefined) return undefined;
+
+  const cached = analysisCache.get(uri);
+  if (cached && cached.text === text) return cached.analysis;
+
+  const analysis = analyzePawn(text);
+  analysisCache.set(uri, { text, analysis });
+  return analysis;
 };
 
-const getSymbolOccurrences = (
+interface WorkspacePawnAnalysis {
+  uri: string;
+  analysis: PawnAnalysis;
+}
+
+const getWorkspaceAnalyses = (): WorkspacePawnAnalysis[] => {
+  const uris = new Set<string>(indexedPawnFiles.keys());
+  documents.all().forEach((document) => uris.add(document.uri));
+
+  const result: WorkspacePawnAnalysis[] = [];
+  uris.forEach((uri) => {
+    const analysis = getAnalysis(uri);
+    if (analysis) result.push({ uri, analysis });
+  });
+  return result;
+};
+
+const resolveSymbolAt = (
   uri: string,
-  name: string,
-  searchWorkspace: boolean
+  document: TextDocument,
+  position: Position
+): { symbol: PawnSymbol; workspace: WorkspacePawnAnalysis[] } | undefined => {
+  const currentAnalysis = getAnalysis(uri);
+  if (!currentAnalysis) return undefined;
+
+  const workspace = getWorkspaceAnalyses();
+  const symbol = resolvePawnSymbol(
+    currentAnalysis,
+    uri,
+    document.offsetAt(position),
+    workspace.map((entry) => entry.analysis)
+  );
+  return symbol ? { symbol, workspace } : undefined;
+};
+
+const symbolOccurrences = (
+  uri: string,
+  symbol: PawnSymbol,
+  workspace: WorkspacePawnAnalysis[]
 ): Location[] => {
-  const uris = searchWorkspace ? Array.from(indexedPawnFiles.keys()) : [uri];
-  const locations: Location[] = [];
-
-  uris.forEach((targetUri) => {
-    const text = getDocumentText(targetUri);
-    if (text === undefined) return;
-
-    const document = TextDocument.create(targetUri, "pawn", 1, text);
-    findPawnIdentifierOccurrences(text, name).forEach((token) => {
-      const start = document.positionAt(token.start);
-      const end = document.positionAt(token.end);
-      locations.push(Location.create(targetUri, { start, end }));
+  return getBoundOccurrences(symbol, uri, workspace).map(({ uri: targetUri, token }) => {
+    const targetAnalysis = workspace.find((entry) => entry.uri === targetUri)?.analysis;
+    const targetText = targetAnalysis?.text || "";
+    const targetDocument = TextDocument.create(targetUri, "pawn", 1, targetText);
+    return Location.create(targetUri, {
+      start: targetDocument.positionAt(token.start),
+      end: targetDocument.positionAt(token.end),
     });
   });
-
-  return locations;
 };
 
 connection.onReferences((params: ReferenceParams) => {
   const document = documents.get(params.textDocument.uri);
   if (!document) return [];
 
-  const offset = document.offsetAt(params.position);
-  const token = findPawnIdentifierAt(document.getText(), offset);
-  if (!token) return [];
+  const resolved = resolveSymbolAt(document.uri, document, params.position);
+  if (!resolved) return [];
 
-  const locations = getSymbolOccurrences(
-    document.uri,
-    token.value,
-    isProjectSymbol(token.value)
+  const locations = symbolOccurrences(document.uri, resolved.symbol, resolved.workspace);
+  if (params.context.includeDeclaration) return locations;
+
+  return locations.filter((location) =>
+    location.uri !== document.uri ||
+    location.range.start.character !== document.positionAt(resolved.symbol.start).character ||
+    location.range.start.line !== document.positionAt(resolved.symbol.start).line
   );
-
-  if (!params.context.includeDeclaration) {
-    const declarationLocations = [
-      functionTokens.get(token.value)?.definition
-    ].concat(
-      Array.from(definitionTokens.values()).flat()
-        .filter((definition) => definition.completion.label === token.value)
-        .map((definition) => definition.definition)
-    );
-    const declarationKeys = new Set(
-      declarationLocations.filter((value): value is Location => value !== undefined)
-        .map((value) => `${value.uri}:${value.range.start.line}:${value.range.start.character}`)
-    );
-    return locations.filter((location) =>
-      !declarationKeys.has(`${location.uri}:${location.range.start.line}:${location.range.start.character}`)
-    );
-  }
-
-  return locations;
 });
 
 connection.onRenameRequest((params: RenameParams): WorkspaceEdit | undefined => {
@@ -396,15 +426,10 @@ connection.onRenameRequest((params: RenameParams): WorkspaceEdit | undefined => 
   const document = documents.get(params.textDocument.uri);
   if (!document) return undefined;
 
-  const offset = document.offsetAt(params.position);
-  const token = findPawnIdentifierAt(document.getText(), offset);
-  if (!token) return undefined;
+  const resolved = resolveSymbolAt(document.uri, document, params.position);
+  if (!resolved) return undefined;
 
-  const locations = getSymbolOccurrences(
-    document.uri,
-    token.value,
-    isProjectSymbol(token.value)
-  );
+  const locations = symbolOccurrences(document.uri, resolved.symbol, resolved.workspace);
   if (locations.length === 0) return undefined;
 
   const changes: { [uri: string]: TextEdit[] } = {};
@@ -417,7 +442,10 @@ connection.onRenameRequest((params: RenameParams): WorkspaceEdit | undefined => 
 });
 
 const semanticLegend: SemanticTokensLegend = {
-  tokenTypes: ["keyword", "function", "macro", "variable", "number", "string", "comment"],
+  tokenTypes: [
+    "keyword", "function", "macro", "variable", "parameter",
+    "enum", "enumMember", "type", "number", "string", "comment"
+  ],
   tokenModifiers: ["declaration"],
 };
 
@@ -425,46 +453,90 @@ connection.languages.semanticTokens.on((params) => {
   const document = documents.get(params.textDocument.uri);
   if (!document) return { data: [] };
 
-  const text = document.getText();
-  const tokens = tokenizePawn(text);
-  const builder = new SemanticTokensBuilder();
-  const macros = new Set<string>();
-  definitionTokens.forEach((definitions) => {
-    definitions.forEach((definition) => macros.add(definition.completion.label));
+  const analysis = getAnalysis(document.uri);
+  if (!analysis) return { data: [] };
+
+  const workspace = getWorkspaceAnalyses();
+  const projectKinds = new Map<string, PawnSymbol["kind"]>();
+  workspace.forEach((entry) => {
+    entry.analysis.symbols.forEach((symbol) => {
+      if (!projectKinds.has(symbol.name) ||
+          symbol.kind === "function" ||
+          symbol.kind === "macro" ||
+          symbol.kind === "enum" ||
+          symbol.kind === "enumMember" ||
+          symbol.kind === "type") {
+        projectKinds.set(symbol.name, symbol.kind);
+      }
+    });
   });
 
-  const tokenTypeIndex: { [key: string]: number } = {
-    keyword: 0,
-    function: 1,
-    macro: 2,
-    variable: 3,
-    number: 4,
-    string: 5,
-    comment: 6,
-  };
+  const localSymbols = analysis.symbols.filter(
+    (symbol) => symbol.kind === "local" || symbol.kind === "parameter"
+  );
+  const declarations = new Map<number, PawnSymbol>();
+  analysis.symbols.forEach((symbol) => declarations.set(symbol.start, symbol));
 
-  tokens.forEach((token) => {
+  const tokenTypes = semanticLegend.tokenTypes;
+  const tokenTypeIndex = new Map(tokenTypes.map((type, index) => [type, index]));
+  const builder = new SemanticTokensBuilder();
+
+  analysis.tokens.forEach((token) => {
     let tokenType: string | undefined;
+    let isDeclaration = false;
 
     if (token.kind === "comment") tokenType = "comment";
     else if (token.kind === "string") tokenType = "string";
     else if (token.kind === "number") tokenType = "number";
     else if (token.kind === "identifier") {
       const normalized = token.value.toLowerCase();
-      if (pawnKeywords.has(normalized)) tokenType = "keyword";
-      else if (macros.has(token.value)) tokenType = "macro";
-      else if (functionTokens.has(token.value)) tokenType = "function";
-      else tokenType = "variable";
+      const declaration = declarations.get(token.start);
+
+      if (declaration) {
+        isDeclaration = true;
+        switch (declaration.kind) {
+          case "function": tokenType = "function"; break;
+          case "macro": tokenType = "macro"; break;
+          case "parameter": tokenType = "parameter"; break;
+          case "enum": tokenType = "enum"; break;
+          case "enumMember": tokenType = "enumMember"; break;
+          case "type": tokenType = "type"; break;
+          default: tokenType = "variable"; break;
+        }
+      } else if (pawnKeywords.has(normalized)) {
+        tokenType = "keyword";
+      } else {
+        const local = localSymbols
+          .filter((symbol) =>
+            symbol.name === token.value &&
+            token.start >= symbol.scopeStart &&
+            token.start <= symbol.scopeEnd &&
+            symbol.start <= token.start
+          )
+          .sort((a, b) => b.start - a.start)[0];
+
+        const kind = local?.kind || projectKinds.get(token.value);
+        if (kind === "function") tokenType = "function";
+        else if (kind === "macro") tokenType = "macro";
+        else if (kind === "parameter") tokenType = "parameter";
+        else if (kind === "enum") tokenType = "enum";
+        else if (kind === "enumMember") tokenType = "enumMember";
+        else if (kind === "type") tokenType = "type";
+        else tokenType = "variable";
+      }
     }
 
     if (!tokenType) return;
+    const typeIndex = tokenTypeIndex.get(tokenType);
+    if (typeIndex === undefined) return;
+
     const position = document.positionAt(token.start);
     builder.push(
       position.line,
       position.character,
       token.end - token.start,
-      tokenTypeIndex[tokenType],
-      0
+      typeIndex,
+      isDeclaration ? 1 : 0
     );
   });
 
