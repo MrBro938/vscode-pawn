@@ -118,7 +118,25 @@
                 "command": "extension.packageBuild",
                 "title": "Build Pawn Package"
             }
-        ]
+        ],
+        "configuration": {
+            "title": "Pawn Tools",
+            "properties": {
+                "pawn.includePaths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Additional Pawn include directories. Relative paths are resolved from each workspace folder."
+                },
+                "pawn.compilerPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to the Pawn compiler executable or its directory. Used to locate the adjacent pawn.cfg and standard include directory."
+                }
+            }
+        }
     },
     "scripts": {
         "vscode:prepublish": "npm run compile",
