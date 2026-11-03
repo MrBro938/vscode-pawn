@@ -14,7 +14,7 @@ import {
   MarkedString,
   Position,
   Location,
-} from "vscode-languageserver";
+} from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import * as fs from "fs";
 import * as path from "path";
