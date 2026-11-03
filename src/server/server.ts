@@ -26,7 +26,7 @@ import {
 import { TextDocument } from "vscode-languageserver-textdocument";
 import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 import { positionToIndex, findIdentifierAtCursor } from "./util";
 import {
@@ -137,7 +137,7 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
 };
 
 const isPawnSourceFile = (filename: string) =>
-  /\\.(?:inc|pwn|pawn|p)$/i.test(filename);
+  /\.(?:inc|pwn|pawn|p)$/i.test(filename);
 
 const scanIncludeDirectory = (
   directory: string,
@@ -148,6 +148,14 @@ const scanIncludeDirectory = (
     const relative = path.relative(root, filePath);
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
   });
+
+  const directoryIsInWorkspace = workspaceRoots.some((root) => {
+    const relative = path.relative(path.resolve(root), path.resolve(directory));
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  });
+  // The extension already indexes every Pawn source file under workspace
+  // folders. Avoid walking a whole workspace root a second time.
+  if (directoryIsInWorkspace) return;
 
   const pending = [{ directory, depth: 0 }];
   let indexedCount = 0;
