@@ -18,7 +18,6 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 
 import { positionToIndex, findIdentifierAtCursor } from "./util";
 import {
-  PawnFunction,
   parseFunctions,
   functionTokens,
   findFunctionIdentifier,
@@ -84,10 +83,6 @@ documents.onDidClose((event) => {
   completionCache.clear();
 });
 
-connection.onDidChangeConfiguration(() => {
-  documents.all().forEach(scheduleCollectSymbols);
-});
-
 // Workspace files are read in the extension host without opening editor documents.
 // They are indexed in small batches to keep the initial language-server load responsive.
 connection.onNotification(
@@ -110,6 +105,10 @@ connection.onNotification(
     }
   }
 );
+
+connection.onDidChangeConfiguration(() => {
+  documents.all().forEach(scheduleCollectSymbols);
+});
 
 const buildCompletionItems = (uri: string): CompletionItem[] => {
   const cached = completionCache.get(uri);
@@ -178,15 +177,27 @@ const doHover = (
   const result = findIdentifierAtCursor(content, cursorIndex);
   const snip = functionTokens.get(result.identifier);
 
-  if (!snip) return undefined;
-
-  const contents: MarkedString[] = [];
-  if (snip.completion.label !== undefined) contents.push(snip.completion.label);
-  if (snip.completion.documentation !== undefined) {
-    contents.push(String(snip.completion.documentation));
+  if (snip) {
+    const contents: MarkedString[] = [];
+    if (snip.completion.label !== undefined) contents.push(snip.completion.label);
+    if (snip.completion.documentation !== undefined) {
+      contents.push(String(snip.completion.documentation));
+    }
+    return { contents };
   }
 
-  return { contents };
+  // Preserve hover support for #define symbols, which were previously stored
+  // in the same lookup table as functions.
+  for (const definitions of definitionTokens.values()) {
+    const definition = definitions.find(
+      (item) => item.completion.label === result.identifier
+    );
+    if (definition) {
+      return { contents: [definition.completion.label] };
+    }
+  }
+
+  return undefined;
 };
 
 connection.onSignatureHelp((params: SignatureHelpParams):
@@ -234,7 +245,9 @@ const doGoToDef = (document: TextDocument, position: Position) => {
   if (functionSymbol) return functionSymbol.definition;
 
   for (const definitions of definitionTokens.values()) {
-    const definition = definitions.find((item) => item.completion.label === result.identifier);
+    const definition = definitions.find(
+      (item) => item.completion.label === result.identifier
+    );
     if (definition) return definition.definition;
   }
 
