@@ -24,9 +24,8 @@ import {
   SemanticTokensLegend,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
-import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+import { fileURLToPath } from "url";
 
 import { positionToIndex, findIdentifierAtCursor } from "./util";
 import {
