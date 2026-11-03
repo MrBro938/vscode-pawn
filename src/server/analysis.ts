@@ -376,8 +376,29 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     }
     if (!isPunctuation(tokens[statementEnd], ";")) continue;
 
-    const scopeStart = functionRegion ? functionRegion.start : 0;
-    const scopeEnd = functionRegion ? functionRegion.end : text.length;
+    let scopeStart = functionRegion ? functionRegion.start : 0;
+    let scopeEnd = functionRegion ? functionRegion.end : text.length;
+
+    if (functionRegion) {
+      const enclosingBlocks = Array.from(bracePairs.entries())
+        .filter(([open, close]) =>
+          open >= functionRegion.openToken &&
+          close <= functionRegion.closeToken &&
+          tokens[open].start < tokens[index].start &&
+          tokens[close].start > tokens[index].start
+        )
+        .sort((left, right) =>
+          (tokens[left[1]].start - tokens[left[0]].start) -
+          (tokens[right[1]].start - tokens[right[0]].start)
+        );
+
+      const innermostBlock = enclosingBlocks[0];
+      if (innermostBlock) {
+        scopeStart = tokens[innermostBlock[0]].end;
+        scopeEnd = tokens[innermostBlock[1]].start;
+      }
+    }
+
     const declarations = splitTopLevel(tokens, index + 1, statementEnd, ",");
     declarations.forEach(([declStart, declEnd]) => {
       if (declStart >= declEnd) return;
