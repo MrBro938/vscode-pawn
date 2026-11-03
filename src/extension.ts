@@ -76,6 +76,19 @@ const indexWorkspaceFiles = async () => {
   }
 };
 
+const sendIncludeConfiguration = async () => {
+  if (!clientReady) return;
+
+  const configuration = vscode.workspace.getConfiguration("pawn");
+  await client.sendNotification("pawn/configureIncludes", {
+    workspaceRoots: (vscode.workspace.workspaceFolders || []).map(
+      (folder) => folder.uri.fsPath
+    ),
+    includePaths: configuration.get<string[]>("includePaths", []),
+    compilerPath: configuration.get<string>("compilerPath", ""),
+  });
+};
+
 export async function activate(context: vscode.ExtensionContext) {
   const serverModule = context.asAbsolutePath(join("out", "server", "server.js"));
   const debugOptions = { execArgv: ["--nolazy", "--inspect=6009"] };
@@ -110,6 +123,25 @@ export async function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(watcher);
 
+  const configWatcher = vscode.workspace.createFileSystemWatcher(
+    "**/{pawn.json,pawn.cfg}"
+  );
+  configWatcher.onDidCreate(() => void sendIncludeConfiguration());
+  configWatcher.onDidChange(() => void sendIncludeConfiguration());
+  configWatcher.onDidDelete(() => void sendIncludeConfiguration());
+  context.subscriptions.push(configWatcher);
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration("pawn.includePaths") ||
+        event.affectsConfiguration("pawn.compilerPath")
+      ) {
+        void sendIncludeConfiguration();
+      }
+    })
+  );
+
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument((document) => {
       if (
@@ -127,6 +159,7 @@ export async function activate(context: vscode.ExtensionContext) {
   client.start().then(async () => {
     clientReady = true;
     await indexWorkspaceFiles();
+    await sendIncludeConfiguration();
   }).catch((error: Error) => {
     console.error("[Pawn Tools] Language server failed to start", error);
   });
