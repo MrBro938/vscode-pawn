@@ -34,6 +34,7 @@ assert.ok(find("TestNative", "function"), "forward prototype should be indexed")
 assert.ok(find("g_Total", "global"), "global variable should be indexed");
 assert.ok(find("E_PLAYER", "enum"), "named enum should be indexed");
 assert.ok(find("E_ID", "enumMember"), "enum member should be indexed");
+assert.ok(find("E_PLAYER", "type"), "enum tag should also be registered as a Pawn type");
 assert.equal(find("E_NAME", "enumMember").isArray, true, "enum array member should be marked as an array");
 
 const localDeclarations = analysis.symbols.filter(
@@ -47,7 +48,7 @@ const resolved = resolvePawnSymbol(analysis, uri, firstUseOffset, [analysis]);
 assert.equal(resolved, firstLocal, "local reference should resolve to the declaration in its own function");
 
 const occurrences = getBoundOccurrences(firstLocal, uri, [{ uri, analysis }]);
-assert.equal(occurrences.length, 2, "local references should not cross into the second function");
+assert.equal(occurrences.length, 3, "local references should include the declaration and uses, but not cross into the second function");
 assert.ok(
   occurrences.every(({ token }) => token.start >= firstLocal.start && token.start < firstLocal.scopeEnd),
   "local references should stay inside the declaration's scope"
