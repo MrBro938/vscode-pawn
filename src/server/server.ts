@@ -373,7 +373,7 @@ const resolveSymbolAt = (
   uri: string,
   document: TextDocument,
   position: Position
-): { symbol: PawnSymbol; workspace: WorkspacePawnAnalysis[] } | undefined => {
+): { symbol: PawnSymbol; symbolUri: string; workspace: WorkspacePawnAnalysis[] } | undefined => {
   const currentAnalysis = getAnalysis(uri);
   if (!currentAnalysis) return undefined;
 
@@ -384,7 +384,16 @@ const resolveSymbolAt = (
     document.offsetAt(position),
     workspace.map((entry) => entry.analysis)
   );
-  return symbol ? { symbol, workspace } : undefined;
+  if (!symbol) return undefined;
+
+  const declarationEntry = workspace.find((entry) =>
+    entry.analysis.symbols.includes(symbol)
+  );
+  return {
+    symbol,
+    symbolUri: declarationEntry?.uri || uri,
+    workspace,
+  };
 };
 
 const symbolOccurrences = (
@@ -410,13 +419,25 @@ connection.onReferences((params: ReferenceParams) => {
   const resolved = resolveSymbolAt(document.uri, document, params.position);
   if (!resolved) return [];
 
-  const locations = symbolOccurrences(document.uri, resolved.symbol, resolved.workspace);
+  const locations = symbolOccurrences(resolved.symbolUri, resolved.symbol, resolved.workspace);
   if (params.context.includeDeclaration) return locations;
 
+  const declarationEntry = resolved.workspace.find(
+    (entry) => entry.uri === resolved.symbolUri
+  );
+  const declarationDocument = documents.get(resolved.symbolUri) ||
+    TextDocument.create(
+      resolved.symbolUri,
+      "pawn",
+      1,
+      declarationEntry?.analysis.text || ""
+    );
+  const declarationPosition = declarationDocument.positionAt(resolved.symbol.start);
+
   return locations.filter((location) =>
-    location.uri !== document.uri ||
-    location.range.start.character !== document.positionAt(resolved.symbol.start).character ||
-    location.range.start.line !== document.positionAt(resolved.symbol.start).line
+    location.uri !== resolved.symbolUri ||
+    location.range.start.character !== declarationPosition.character ||
+    location.range.start.line !== declarationPosition.line
   );
 });
 
@@ -429,7 +450,7 @@ connection.onRenameRequest((params: RenameParams): WorkspaceEdit | undefined => 
   const resolved = resolveSymbolAt(document.uri, document, params.position);
   if (!resolved) return undefined;
 
-  const locations = symbolOccurrences(document.uri, resolved.symbol, resolved.workspace);
+  const locations = symbolOccurrences(resolved.symbolUri, resolved.symbol, resolved.workspace);
   if (locations.length === 0) return undefined;
 
   const changes: { [uri: string]: TextEdit[] } = {};
