@@ -13,8 +13,12 @@ import {
   CompletionParams,
   MarkedString,
   Position,
+  Location,
 } from "vscode-languageserver";
 import { TextDocument } from "vscode-languageserver-textdocument";
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 
 import { positionToIndex, findIdentifierAtCursor } from "./util";
 import {
@@ -220,6 +224,67 @@ const doSignHelp = (
   };
 };
 
+const resolveIncludeDefinition = (
+  document: TextDocument,
+  position: Position
+): Location | undefined => {
+  const lines = document.getText().split(/\r?\n/);
+  const line = lines[position.line];
+  if (line === undefined) return undefined;
+
+  const match = /^\s*#\s*include\s*[<"]([^">]+)[">]/i.exec(line);
+  if (!match) return undefined;
+
+  const includePath = match[1].trim();
+  const pathStart = line.indexOf(match[1]);
+  if (
+    position.character < pathStart ||
+    position.character > pathStart + match[1].length
+  ) {
+    return undefined;
+  }
+
+  try {
+    if (!document.uri.startsWith("file:")) return undefined;
+
+    const sourceFile = fileURLToPath(document.uri);
+    const normalizedIncludePath = includePath.replace(/[\\/]+/g, path.sep);
+    const resolvedPath = path.resolve(
+      path.dirname(sourceFile),
+      normalizedIncludePath
+    );
+
+    const candidates = [resolvedPath];
+    if (!path.extname(resolvedPath)) {
+      candidates.push(
+        resolvedPath + ".inc",
+        resolvedPath + ".pwn",
+        resolvedPath + ".pawn",
+        resolvedPath + ".p"
+      );
+    }
+
+    const targetPath = candidates.find((candidate) => {
+      try {
+        return fs.statSync(candidate).isFile();
+      } catch {
+        return false;
+      }
+    });
+
+    if (!targetPath) return undefined;
+
+    const targetUri = pathToFileURL(targetPath).toString();
+    return Location.create(targetUri, {
+      start: { line: 0, character: 0 },
+      end: { line: 0, character: 0 },
+    });
+  } catch {
+    // Ignore unsupported document schemes and malformed or inaccessible paths.
+    return undefined;
+  }
+};
+
 connection.onDefinition((params: DefinitionParams) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return undefined;
@@ -227,6 +292,9 @@ connection.onDefinition((params: DefinitionParams) => {
 });
 
 const doGoToDef = (document: TextDocument, position: Position) => {
+  const includeDefinition = resolveIncludeDefinition(document, position);
+  if (includeDefinition) return includeDefinition;
+
   const content = document.getText();
   const cursorIndex = positionToIndex(content, position);
   const result = findIdentifierAtCursor(content, cursorIndex);
