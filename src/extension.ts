@@ -7,10 +7,15 @@ let clientReady = false;
 
 const pawnGlob = "**/*.{p,pwn,pawn,inc}";
 const excludedGlob = "**/{.git,node_modules,.vscode-test,dist,out}/**";
-const INDEX_BATCH_SIZE = 16;
+const INDEX_BATCH_SIZE = 4;
+
+const isDocumentOpen = (uri: vscode.Uri) =>
+  vscode.workspace.textDocuments.some(
+    (document) => document.uri.toString() === uri.toString()
+  );
 
 const readAndIndexFile = async (uri: vscode.Uri) => {
-  if (!clientReady) return;
+  if (!clientReady || isDocumentOpen(uri)) return;
 
   try {
     const bytes = await vscode.workspace.fs.readFile(uri);
@@ -27,7 +32,10 @@ const indexWorkspaceFiles = async () => {
   const files = await vscode.workspace.findFiles(pawnGlob, excludedGlob, 5000);
 
   for (let offset = 0; offset < files.length; offset += INDEX_BATCH_SIZE) {
-    const batch = files.slice(offset, offset + INDEX_BATCH_SIZE);
+    const batch = files
+      .slice(offset, offset + INDEX_BATCH_SIZE)
+      .filter((uri) => !isDocumentOpen(uri));
+
     const indexedFiles = await Promise.all(
       batch.map(async (uri) => {
         try {
@@ -51,7 +59,7 @@ const indexWorkspaceFiles = async () => {
       await client.sendNotification("pawn/indexFiles", { files: validFiles });
     }
 
-    // Yield to the extension host between batches so indexing does not monopolise it.
+    // Yield to the extension host between small batches.
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   }
 };
