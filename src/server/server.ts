@@ -742,6 +742,29 @@ const resolveIncludeDefinition = (
 connection.onDefinition((params: DefinitionParams) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return undefined;
+
+  const includeDefinition = resolveIncludeDefinition(doc, params.position);
+  if (includeDefinition) return includeDefinition;
+
+  const resolved = resolveSymbolAt(doc.uri, doc, params.position);
+  if (resolved) {
+    const targetAnalysis = resolved.workspace.find(
+      (entry) => entry.uri === resolved.symbolUri
+    )?.analysis;
+    const targetDocument = documents.get(resolved.symbolUri) ||
+      TextDocument.create(
+        resolved.symbolUri,
+        "pawn",
+        1,
+        targetAnalysis?.text || ""
+      );
+
+    return Location.create(resolved.symbolUri, {
+      start: targetDocument.positionAt(resolved.symbol.start),
+      end: targetDocument.positionAt(resolved.symbol.end),
+    });
+  }
+
   return doGoToDef(doc, params.position);
 });
 
