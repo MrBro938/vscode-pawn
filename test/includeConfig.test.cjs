@@ -58,7 +58,7 @@ try {
   write("dependencies/samp-stdlib/pawn.json", JSON.stringify({}));
   write("pawno/pawn.cfg", [
     "-d3",
-    "-ipawno/cfg/includes",
+    "-icfg/includes",
     "-i=pawno/cfg/second",
     "-O2"
   ].join("\n"));
