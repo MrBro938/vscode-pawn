@@ -91,8 +91,12 @@ const looksLikeFunctionDeclaration = (
   let next = closeParen + 1;
   while (next < tokens.length && tokens[next].kind === "comment") next++;
   if (isPunctuation(tokens[next], ":")) next += 2; // optional state name
-  if (isPunctuation(tokens[next], "{") || isPunctuation(tokens[next], ";")) {
-    return true;
+  if (isPunctuation(tokens[next], "{")) return true;
+
+  // Semicolon-terminated declarations must be explicit prototypes; otherwise
+  // a call at file scope could be mistaken for a function declaration.
+  if (isPunctuation(tokens[next], ";")) {
+    return /\b(?:forward|native|stock)\s+/.test(prefix);
   }
 
   // A function body may put its opening brace on the next line.
@@ -175,18 +179,27 @@ export const analyzePawn = (text: string): PawnAnalysis => {
   const functions: FunctionRegion[] = [];
   const bracePairs = new Map<number, number>();
   const braceStack: number[] = [];
+  const braceDepths: number[] = [];
+  let braceDepth = 0;
 
   tokens.forEach((token, index) => {
-    if (isPunctuation(token, "{")) braceStack.push(index);
-    else if (isPunctuation(token, "}")) {
+    if (isPunctuation(token, "}")) braceDepth = Math.max(0, braceDepth - 1);
+    braceDepths[index] = braceDepth;
+
+    if (isPunctuation(token, "{")) {
+      braceStack.push(index);
+      braceDepth++;
+    } else if (isPunctuation(token, "}")) {
       const open = braceStack.pop();
       if (open !== undefined) bracePairs.set(open, index);
     }
   });
 
-  // Discover function declarations and their lexical bodies.
+  // Pawn functions are declared at file scope. This prevents ordinary calls
+  // inside function bodies from being mistaken for declarations.
   for (let index = 0; index < tokens.length - 1; index++) {
     const nameToken = tokens[index];
+    if (braceDepths[index] !== 0) continue;
     if (nameToken.kind !== "identifier" || keywords.has(nameToken.value.toLowerCase())) continue;
     if (!isPunctuation(tokens[index + 1], "(")) continue;
 
@@ -446,7 +459,11 @@ export const getBoundOccurrences = (
       if (token.kind !== "identifier" || token.value !== target.name) return;
 
       if (localSymbol) {
-        if (token.start < target.scopeStart || token.start > target.scopeEnd) return;
+        if (
+          token.start < target.scopeStart ||
+          token.start > target.scopeEnd ||
+          token.start < target.start
+        ) return;
 
         const shadowing = analysis.symbols
           .filter((symbol) =>
