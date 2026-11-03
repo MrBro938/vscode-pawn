@@ -1,4 +1,4 @@
-export type PawnTokenKind = "identifier" | "comment" | "string" | "number";
+export type PawnTokenKind = "identifier" | "comment" | "string" | "number" | "punctuation";
 
 export interface PawnToken {
   value: string;
@@ -76,6 +76,12 @@ export const tokenizePawn = (source: string): PawnToken[] => {
       continue;
     }
 
+    tokens.push({
+      value: character,
+      start: index,
+      end: index + 1,
+      kind: "punctuation",
+    });
     index++;
   }
 
