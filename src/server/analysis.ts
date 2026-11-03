@@ -338,14 +338,16 @@ export const analyzePawn = (text: string): PawnAnalysis => {
 
     // "static" can also be a function modifier. Do not parse the function
     // header as a variable declaration.
-    if (
-      keyword === "static" &&
-      symbols.some((symbol) =>
+    if (keyword === "static") {
+      const lineEnd = text.indexOf("\n", tokens[index].start);
+      const declarationEnd = lineEnd === -1 ? text.length : lineEnd;
+      const isFunctionModifier = symbols.some((symbol) =>
         symbol.kind === "function" &&
         symbol.start > tokens[index].start &&
-        symbol.start < text.indexOf("\n", tokens[index].start) + 1
-      )
-    ) continue;
+        symbol.start < declarationEnd
+      );
+      if (isFunctionModifier) continue;
+    }
 
     const functionRegion = functions
       .filter((region) => tokens[index].start >= region.start && tokens[index].start <= region.end)
@@ -474,11 +476,12 @@ export const getBoundOccurrences = (
       if (token.kind !== "identifier" || token.value !== target.name) return;
 
       if (localSymbol) {
-        if (
+        const isDeclaration = token.start === target.start;
+        if (!isDeclaration && (
           token.start < target.scopeStart ||
           token.start > target.scopeEnd ||
           token.start < target.start
-        ) return;
+        )) return;
 
         const shadowing = analysis.symbols
           .filter((symbol) =>
