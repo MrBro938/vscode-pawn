@@ -15,17 +15,16 @@ export interface PawnDefinition {
 export const definitionTokens: Map<string, PawnDefinition[]> = new Map();
 
 export const parseDefinitions = (textDocument: TextDocument) => {
-  const regexDefine = /^\s*#define\s+([A-Za-z_][A-Za-z0-9_]*)/gm;
-  const content = textDocument.getText();
+  const regexDefine = /^\s*#define\s+([A-Za-z_][A-Za-z0-9_]*)/;
+  const lines = textDocument.getText().split("\n");
   const definitions: PawnDefinition[] = [];
-  let match: RegExpExecArray | null;
 
-  while ((match = regexDefine.exec(content)) !== null) {
-    const before = content.slice(0, match.index);
-    const line = before.split("\n").length - 1;
-    const lineStart = before.lastIndexOf("\n") + 1;
-    const character = match.index + match[0].indexOf(match[1]) - lineStart;
+  lines.forEach((line, lineIndex) => {
+    const match = regexDefine.exec(line);
+    if (!match) return;
+
     const name = match[1];
+    const character = line.indexOf(name);
 
     definitions.push({
       textDocument,
@@ -35,11 +34,11 @@ export const parseDefinitions = (textDocument: TextDocument) => {
         insertText: name,
       },
       definition: Location.create(textDocument.uri, {
-        start: { line, character },
-        end: { line, character: character + name.length },
+        start: { line: lineIndex, character },
+        end: { line: lineIndex, character: character + name.length },
       }),
     });
-  }
+  });
 
   definitionTokens.set(textDocument.uri, definitions);
 };
