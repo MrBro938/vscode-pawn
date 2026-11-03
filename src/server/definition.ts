@@ -7,7 +7,7 @@ import {
 import { TextDocument } from "vscode-languageserver-textdocument";
 
 export interface PawnDefinition {
-  textDocument: TextDocument;
+  uri: string;
   completion: CompletionItem;
   definition: Definition;
 }
@@ -27,7 +27,7 @@ export const parseDefinitions = (textDocument: TextDocument) => {
     const character = line.indexOf(name);
 
     definitions.push({
-      textDocument,
+      uri: textDocument.uri,
       completion: {
         label: name,
         kind: CompletionItemKind.Text,
