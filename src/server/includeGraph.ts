@@ -24,13 +24,39 @@ const includeVariants = (includePath: string): string[] => {
 
 export const extractPawnIncludes = (text: string): string[] => {
   const includes: string[] = [];
-  const pattern = /^\s*#\s*include\s*[<"]([^">]+)[">]/gim;
-  let match: RegExpExecArray | null;
+  const lines = text.split(/\r?\n/);
+  let insideBlockComment = false;
 
-  while ((match = pattern.exec(text)) !== null) {
-    const includePath = match[1].trim();
+  lines.forEach((line) => {
+    let index = 0;
+
+    // Ignore comments before a preprocessor directive, including multi-line
+    // block comments. A commented-out #include must not create a graph edge.
+    while (index < line.length) {
+      if (insideBlockComment) {
+        const close = line.indexOf("*/", index);
+        if (close === -1) return;
+        insideBlockComment = false;
+        index = close + 2;
+        continue;
+      }
+
+      while (index < line.length && /\s/.test(line[index])) index++;
+      if (line.startsWith("//", index)) return;
+      if (line.startsWith("/*", index)) {
+        insideBlockComment = true;
+        index += 2;
+        continue;
+      }
+      break;
+    }
+
+    if (insideBlockComment) return;
+
+    const match = /^#\s*include\s*[<"]([^">]+)[">]/i.exec(line.slice(index));
+    const includePath = match?.[1]?.trim();
     if (includePath) includes.push(includePath);
-  }
+  });
 
   return includes;
 };
