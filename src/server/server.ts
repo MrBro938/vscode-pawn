@@ -24,6 +24,7 @@ import {
   SemanticTokensLegend,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
+import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
@@ -50,6 +51,7 @@ import {
   PawnIncludeGraph,
   resolveIncludeUris,
 } from "./includeGraph";
+import { resolveIncludeConfiguration } from "./includeConfig";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -64,7 +66,11 @@ const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>(
 const indexedPawnFiles = new Map<string, string>();
 const indexedPawnTexts = new Map<string, string>();
 const includePathIndex = new Map<string, Set<string>>();
+const configuredIncludeFileUris = new Set<string>();
 let includeGraph: PawnIncludeGraph = new Map();
+let configuredWorkspaceRoots: string[] = [];
+let configuredIncludePaths: string[] = [];
+let configuredCompilerPath = "";
 
 const rebuildIncludeGraph = () => {
   includeGraph = buildPawnIncludeGraph(
@@ -128,6 +134,89 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
   }
 
   if (rebuildGraph) rebuildIncludeGraph();
+};
+
+const isPawnSourceFile = (filename: string) =>
+  /\\.(?:inc|pwn|pawn|p)$/i.test(filename);
+
+const scanIncludeDirectory = (
+  directory: string,
+  workspaceRoots: string[],
+  maxFiles: number
+) => {
+  const workspaceContains = (filePath: string) => workspaceRoots.some((root) => {
+    const relative = path.relative(root, filePath);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  });
+
+  const pending = [{ directory, depth: 0 }];
+  let indexedCount = 0;
+
+  while (pending.length > 0 && indexedCount < maxFiles) {
+    const current = pending.pop()!;
+    if (current.depth > 12) continue;
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current.directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    entries.forEach((entry) => {
+      if (indexedCount >= maxFiles) return;
+      if (entry.name === ".git" || entry.name === "node_modules" ||
+          entry.name === ".vscode" || entry.name === "out" || entry.name === "dist") {
+        return;
+      }
+
+      const fullPath = path.join(current.directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push({ directory: fullPath, depth: current.depth + 1 });
+        return;
+      }
+
+      if (!entry.isFile() || !isPawnSourceFile(entry.name)) return;
+
+      const absolutePath = path.resolve(fullPath);
+      if (workspaceContains(absolutePath)) return;
+
+      const uri = pathToFileURL(absolutePath).toString();
+      if (indexedPawnFiles.has(uri)) return;
+
+      try {
+        const text = fs.readFileSync(absolutePath, "utf8");
+        indexPawnFile(uri, text, false);
+        collectSymbols(TextDocument.create(uri, "pawn", 1, text), false);
+        configuredIncludeFileUris.add(uri);
+        indexedCount++;
+      } catch {
+        // Ignore include files that are inaccessible or removed during scanning.
+      }
+    });
+  }
+};
+
+const reloadConfiguredIncludes = () => {
+  configuredIncludeFileUris.forEach((uri) => {
+    unindexPawnFile(uri, false);
+    analysisCache.delete(uri);
+    removeDocumentSymbols(uri);
+  });
+  configuredIncludeFileUris.clear();
+
+  const configuration = resolveIncludeConfiguration({
+    workspaceRoots: configuredWorkspaceRoots,
+    customIncludePaths: configuredIncludePaths,
+    compilerPath: configuredCompilerPath,
+  });
+
+  configuration.includeDirectories.forEach((directory) => {
+    scanIncludeDirectory(directory, configuredWorkspaceRoots, 20000);
+  });
+
+  rebuildIncludeGraph();
+  completionCache.clear();
 };
 
 documents.listen(connection);
@@ -234,6 +323,25 @@ connection.onNotification(
       rebuildIncludeGraph();
       completionCache.clear();
     }
+  }
+);
+
+connection.onNotification(
+  "pawn/configureIncludes",
+  (params: {
+    workspaceRoots?: string[];
+    includePaths?: string[];
+    compilerPath?: string;
+  }) => {
+    configuredWorkspaceRoots = (params.workspaceRoots || [])
+      .filter((value) => typeof value === "string")
+      .map((value) => path.resolve(value));
+    configuredIncludePaths = (params.includePaths || [])
+      .filter((value) => typeof value === "string");
+    configuredCompilerPath =
+      typeof params.compilerPath === "string" ? params.compilerPath : "";
+
+    reloadConfiguredIncludes();
   }
 );
 
