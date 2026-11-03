@@ -207,6 +207,10 @@ const scanIncludeDirectory = (
 
 const reloadConfiguredIncludes = () => {
   configuredIncludeFileUris.forEach((uri) => {
+    // An include file may have been opened after it was discovered. Its live
+    // TextDocument is authoritative, so keep its index entry during reload.
+    if (documents.get(uri)) return;
+
     unindexPawnFile(uri, false);
     analysisCache.delete(uri);
     removeDocumentSymbols(uri);
