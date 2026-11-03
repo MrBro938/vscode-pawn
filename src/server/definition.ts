@@ -6,40 +6,40 @@ import {
 } from "vscode-languageserver";
 import { TextDocument } from "vscode-languageserver-textdocument";
 
-import { functionTokens, PawnFunction } from "./function";
+export interface PawnDefinition {
+  textDocument: TextDocument;
+  completion: CompletionItem;
+  definition: Definition;
+}
+
+export const definitionTokens: Map<string, PawnDefinition[]> = new Map();
 
 export const parseDefinitions = (textDocument: TextDocument) => {
-  const regexDefine = /^#define\s+([A-Za-z_]*?)($|\s)/gm;
+  const regexDefine = /^\s*#define\s+([A-Za-z_][A-Za-z0-9_]*)/gm;
   const content = textDocument.getText();
-  const splitContent = content.split("\n");
-  splitContent.forEach((cont: string, index: number) => {
-    var m;
-    do {
-      m = regexDefine.exec(cont);
-      if (m) {
-        const newSnip: CompletionItem = {
-          label: m[1],
-          kind: CompletionItemKind.Text,
-          insertText: m[1],
-        };
+  const definitions: PawnDefinition[] = [];
+  let match: RegExpExecArray | null;
 
-        const newDef: Definition = Location.create(textDocument.uri, {
-          start: { line: index, character: m.input.indexOf(m[1]) },
-          end: { line: index, character: m.input.indexOf(m[1]) + m[1].length },
-        });
+  while ((match = regexDefine.exec(content)) !== null) {
+    const before = content.slice(0, match.index);
+    const line = before.split("\n").length - 1;
+    const lineStart = before.lastIndexOf("\n") + 1;
+    const character = match.index + match[0].indexOf(match[1]) - lineStart;
+    const name = match[1];
 
-        // TODO: Don't use the function table for this, use a separate map.
-        const pwnFun: PawnFunction = {
-          textDocument: textDocument,
-          completion: newSnip,
-          definition: newDef,
-        };
+    definitions.push({
+      textDocument,
+      completion: {
+        label: name,
+        kind: CompletionItemKind.Text,
+        insertText: name,
+      },
+      definition: Location.create(textDocument.uri, {
+        start: { line, character },
+        end: { line, character: character + name.length },
+      }),
+    });
+  }
 
-        const findSnip = functionTokens.get(m[1]);
-        if (findSnip === undefined) {
-          functionTokens.set(m[1], pwnFun);
-        }
-      }
-    } while (m);
-  });
+  definitionTokens.set(textDocument.uri, definitions);
 };
