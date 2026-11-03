@@ -430,8 +430,8 @@ export const resolvePawnSymbol = (
   );
   if (declaration) return declaration;
 
-  const previousToken = analysis.tokens.find((token) => token.end === currentToken.start);
-  if (previousToken?.value === ":") {
+  const nextToken = analysis.tokens.find((token) => token.start === currentToken.end);
+  if (nextToken?.value === ":") {
     for (const candidate of workspace) {
       const typeSymbol = candidate.symbols.find((symbol) =>
         symbol.kind === "type" && symbol.name === name
@@ -440,10 +440,9 @@ export const resolvePawnSymbol = (
     }
   }
 
-  const nextToken = analysis.tokens.find((token) => token.start === currentToken.end);
-  const expectedKind = nextToken?.value === "(" ? "function" : undefined;
-  const globalKinds: PawnSymbolKind[] = expectedKind
-    ? ["function"]
+  const expectedFunction = nextToken?.value === "(";
+  const globalKinds: PawnSymbolKind[] = expectedFunction
+    ? ["function", "macro"]
     : ["macro", "global", "enumMember"];
 
   const localGlobal = analysis.symbols.find((symbol) =>
