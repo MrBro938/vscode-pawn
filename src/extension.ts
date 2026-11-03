@@ -14,8 +14,8 @@ const isDocumentOpen = (uri: vscode.Uri) =>
     (document) => document.uri.toString() === uri.toString()
   );
 
-const readAndIndexFile = async (uri: vscode.Uri) => {
-  if (!clientReady || isDocumentOpen(uri)) return;
+const readAndIndexFile = async (uri: vscode.Uri, force = false) => {
+  if (!clientReady || (!force && isDocumentOpen(uri))) return;
 
   try {
     const bytes = await vscode.workspace.fs.readFile(uri);
@@ -51,8 +51,11 @@ const indexWorkspaceFiles = async () => {
       })
     );
 
+    // A file may have been opened while it was being read. In that case its
+    // in-memory document is authoritative and will be indexed by the LSP events.
     const validFiles = indexedFiles.filter(
-      (file): file is { uri: string; text: string } => file !== undefined
+      (file): file is { uri: string; text: string } =>
+        file !== undefined && !isDocumentOpen(vscode.Uri.parse(file.uri))
     );
 
     if (validFiles.length > 0) {
@@ -97,6 +100,16 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
   context.subscriptions.push(watcher);
+
+  context.subscriptions.push(
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      if (document.languageId === "pawn" && clientReady) {
+        // Restore the saved on-disk version after symbols from the editor buffer
+        // have been removed by the language server's close event.
+        setTimeout(() => readAndIndexFile(document.uri, true), 0);
+      }
+    })
+  );
 
   client.start();
   client.onReady().then(async () => {
