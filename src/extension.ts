@@ -1,4 +1,5 @@
 import { join } from "path";
+import { readFile } from "fs";
 import * as vscode from "vscode";
 import * as VLC from "vscode-languageclient";
 
@@ -9,6 +10,14 @@ const pawnGlob = "**/*.{p,pwn,pawn,inc}";
 const excludedGlob = "**/{.git,node_modules,.vscode-test,dist,out}/**";
 const INDEX_BATCH_SIZE = 4;
 
+const readFileBytes = (uri: vscode.Uri): Promise<Buffer> =>
+  new Promise((resolve, reject) => {
+    readFile(uri.fsPath, (error, data) => {
+      if (error) reject(error);
+      else resolve(data);
+    });
+  });
+
 const isDocumentOpen = (uri: vscode.Uri) =>
   vscode.workspace.textDocuments.some(
     (document) => document.uri.toString() === uri.toString()
@@ -18,9 +27,9 @@ const readAndIndexFile = async (uri: vscode.Uri, force = false) => {
   if (!clientReady || (!force && isDocumentOpen(uri))) return;
 
   try {
-    const bytes = await vscode.workspace.fs.readFile(uri);
+    const bytes = await readFileBytes(uri);
     await client.sendNotification("pawn/indexFiles", {
-      files: [{ uri: uri.toString(), text: Buffer.from(bytes).toString("utf8") }],
+      files: [{ uri: uri.toString(), text: bytes.toString("utf8") }],
     });
   } catch (error) {
     // A file may be deleted or become inaccessible while it is being indexed.
@@ -39,10 +48,10 @@ const indexWorkspaceFiles = async () => {
     const indexedFiles = await Promise.all(
       batch.map(async (uri) => {
         try {
-          const bytes = await vscode.workspace.fs.readFile(uri);
+          const bytes = await readFileBytes(uri);
           return {
             uri: uri.toString(),
-            text: Buffer.from(bytes).toString("utf8"),
+            text: bytes.toString("utf8"),
           };
         } catch (error) {
           console.warn(`[Pawn Tools] Could not read ${uri.fsPath}`, error);
