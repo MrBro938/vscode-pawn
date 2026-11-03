@@ -505,6 +505,10 @@ connection.languages.semanticTokens.on((params) => {
         }
       } else if (pawnKeywords.has(normalized)) {
         tokenType = "keyword";
+      } else if (analysis.tokens.some((candidate) =>
+        candidate.start === token.end && candidate.kind === "punctuation" && candidate.value === ":"
+      )) {
+        tokenType = "type";
       } else {
         const local = localSymbols
           .filter((symbol) =>
