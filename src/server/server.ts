@@ -16,6 +16,12 @@ import {
   Location,
   DocumentSymbol,
   SymbolKind,
+  ReferenceParams,
+  RenameParams,
+  WorkspaceEdit,
+  TextEdit,
+  SemanticTokensBuilder,
+  SemanticTokensLegend,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import * as fs from "fs";
@@ -30,6 +36,7 @@ import {
 } from "./function";
 import { parseWords, wordTokens } from "./words";
 import { definitionTokens, parseDefinitions } from "./definition";
+import { findPawnIdentifierAt, findPawnIdentifierOccurrences, tokenizePawn } from "./symbols";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -41,6 +48,7 @@ const completionCache = new Map<string, CompletionItem[]>();
 // Workspace include index. Each path suffix points to all matching files,
 // allowing includes to resolve independently of the including file's directory.
 const indexedPawnFiles = new Map<string, string>();
+const indexedPawnTexts = new Map<string, string>();
 const includePathIndex = new Map<string, Set<string>>();
 
 const normalizeIndexPath = (value: string) => {
@@ -48,12 +56,13 @@ const normalizeIndexPath = (value: string) => {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 };
 
-const indexPawnFile = (uri: string) => {
+const indexPawnFile = (uri: string, text?: string) => {
   if (!uri.startsWith("file:")) return;
 
   try {
     const filePath = path.resolve(fileURLToPath(uri));
     indexedPawnFiles.set(uri, filePath);
+    if (text !== undefined) indexedPawnTexts.set(uri, text);
 
     const parts = filePath.split(path.sep);
     for (let index = 0; index < parts.length; index++) {
@@ -78,6 +87,7 @@ const unindexPawnFile = (uri: string) => {
   if (!filePath) return;
 
   indexedPawnFiles.delete(uri);
+  indexedPawnTexts.delete(uri);
   const parts = filePath.split(path.sep);
 
   for (let index = 0; index < parts.length; index++) {
@@ -103,6 +113,15 @@ connection.onInitialize(() => ({
     documentSymbolProvider: true,
     hoverProvider: true,
     signatureHelpProvider: { triggerCharacters: ["(", ","] },
+    referencesProvider: true,
+    renameProvider: true,
+    semanticTokensProvider: {
+      legend: {
+        tokenTypes: ["keyword", "function", "macro", "variable", "number", "string", "comment"],
+        tokenModifiers: ["declaration"],
+      },
+      full: true,
+    },
   },
 }));
 
@@ -137,7 +156,7 @@ const scheduleCollectSymbols = (textDocument: TextDocument) => {
 
 documents.onDidOpen((change) => {
   if (change.document.uri.startsWith("file:")) {
-    indexPawnFile(change.document.uri);
+    indexPawnFile(change.document.uri, change.document.getText());
   }
   scheduleCollectSymbols(change.document);
 });
@@ -167,7 +186,7 @@ connection.onNotification(
 
     if (params.files) {
       params.files.forEach((file) => {
-        indexPawnFile(file.uri);
+        indexPawnFile(file.uri, file.text);
         const document = TextDocument.create(file.uri, "pawn", 1, file.text);
         collectSymbols(document, false);
       });
@@ -289,6 +308,167 @@ connection.onCompletion((params: CompletionParams): CompletionList => {
     : items;
 
   return { isIncomplete: false, items: filteredItems };
+});
+
+const pawnKeywords = new Set([
+  "if", "else", "while", "for", "do", "switch", "case", "default",
+  "return", "break", "continue", "goto", "new", "const", "static",
+  "public", "stock", "native", "forward", "enum", "sizeof", "state",
+  "true", "false", "defined", "operator", "assert", "exit", "sleep",
+  "tagof", "and", "or", "not"
+]);
+
+const getDocumentText = (uri: string): string | undefined => {
+  const openDocument = documents.get(uri);
+  return openDocument ? openDocument.getText() : indexedPawnTexts.get(uri);
+};
+
+const isProjectSymbol = (name: string): boolean => {
+  if (functionTokens.has(name)) return true;
+  for (const definitions of definitionTokens.values()) {
+    if (definitions.some((definition) => definition.completion.label === name)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const getSymbolOccurrences = (
+  uri: string,
+  name: string,
+  searchWorkspace: boolean
+): Location[] => {
+  const uris = searchWorkspace ? Array.from(indexedPawnFiles.keys()) : [uri];
+  const locations: Location[] = [];
+
+  uris.forEach((targetUri) => {
+    const text = getDocumentText(targetUri);
+    if (text === undefined) return;
+
+    const document = TextDocument.create(targetUri, "pawn", 1, text);
+    findPawnIdentifierOccurrences(text, name).forEach((token) => {
+      const start = document.positionAt(token.start);
+      const end = document.positionAt(token.end);
+      locations.push(Location.create(targetUri, { start, end }));
+    });
+  });
+
+  return locations;
+};
+
+connection.onReferences((params: ReferenceParams) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return [];
+
+  const offset = document.offsetAt(params.position);
+  const token = findPawnIdentifierAt(document.getText(), offset);
+  if (!token) return [];
+
+  const locations = getSymbolOccurrences(
+    document.uri,
+    token.value,
+    isProjectSymbol(token.value)
+  );
+
+  if (!params.context.includeDeclaration) {
+    const declarationLocations = [
+      functionTokens.get(token.value)?.definition
+    ].concat(
+      Array.from(definitionTokens.values()).flat()
+        .filter((definition) => definition.completion.label === token.value)
+        .map((definition) => definition.definition)
+    );
+    const declarationKeys = new Set(
+      declarationLocations.filter((value): value is Location => value !== undefined)
+        .map((value) => `${value.uri}:${value.range.start.line}:${value.range.start.character}`)
+    );
+    return locations.filter((location) =>
+      !declarationKeys.has(`${location.uri}:${location.range.start.line}:${location.range.start.character}`)
+    );
+  }
+
+  return locations;
+});
+
+connection.onRenameRequest((params: RenameParams): WorkspaceEdit | undefined => {
+  if (!/^[A-Za-z_@][A-Za-z0-9_@]*$/.test(params.newName)) return undefined;
+
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return undefined;
+
+  const offset = document.offsetAt(params.position);
+  const token = findPawnIdentifierAt(document.getText(), offset);
+  if (!token) return undefined;
+
+  const locations = getSymbolOccurrences(
+    document.uri,
+    token.value,
+    isProjectSymbol(token.value)
+  );
+  if (locations.length === 0) return undefined;
+
+  const changes: { [uri: string]: TextEdit[] } = {};
+  locations.forEach((location) => {
+    if (!changes[location.uri]) changes[location.uri] = [];
+    changes[location.uri].push(TextEdit.replace(location.range, params.newName));
+  });
+
+  return { changes };
+});
+
+const semanticLegend: SemanticTokensLegend = {
+  tokenTypes: ["keyword", "function", "macro", "variable", "number", "string", "comment"],
+  tokenModifiers: ["declaration"],
+};
+
+connection.languages.semanticTokens.on((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return { data: [] };
+
+  const text = document.getText();
+  const tokens = tokenizePawn(text);
+  const builder = new SemanticTokensBuilder();
+  const macros = new Set<string>();
+  definitionTokens.forEach((definitions) => {
+    definitions.forEach((definition) => macros.add(definition.completion.label));
+  });
+
+  const tokenTypeIndex: { [key: string]: number } = {
+    keyword: 0,
+    function: 1,
+    macro: 2,
+    variable: 3,
+    number: 4,
+    string: 5,
+    comment: 6,
+  };
+
+  tokens.forEach((token) => {
+    let tokenType: string | undefined;
+
+    if (token.kind === "comment") tokenType = "comment";
+    else if (token.kind === "string") tokenType = "string";
+    else if (token.kind === "number") tokenType = "number";
+    else if (token.kind === "identifier") {
+      const normalized = token.value.toLowerCase();
+      if (pawnKeywords.has(normalized)) tokenType = "keyword";
+      else if (macros.has(token.value)) tokenType = "macro";
+      else if (functionTokens.has(token.value)) tokenType = "function";
+      else tokenType = "variable";
+    }
+
+    if (!tokenType) return;
+    const position = document.positionAt(token.start);
+    builder.push(
+      position.line,
+      position.character,
+      token.end - token.start,
+      tokenTypeIndex[tokenType],
+      0
+    );
+  });
+
+  return builder.build();
 });
 
 connection.onCompletionResolve((item: CompletionItem): CompletionItem => item);
