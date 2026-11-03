@@ -10,7 +10,7 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { isAlphaNum, isDigit, isWhitespace, reverse } from "./util";
 
 export interface PawnFunction {
-  textDocument: TextDocument;
+  uri: string;
   completion: CompletionItem;
   definition: Definition;
   params?: ParameterInformation[];
@@ -74,7 +74,7 @@ export const parseFunctions = (textDocument: TextDocument) => {
           params = [];
         }
         const pwnFun: PawnFunction = {
-          textDocument: textDocument,
+          uri: textDocument.uri,
           definition: newDef,
           completion: newSnip,
           params,
@@ -101,7 +101,6 @@ export const findFunctionIdentifier = (
   let parameterIndex = 0;
 
   while (index >= 0) {
-    // We surely know that we shouldn't search further if we encounter a semicolon
     if (content[index] === ";") {
       return { identifier: "", parameterIndex: 0 };
     }
@@ -109,7 +108,6 @@ export const findFunctionIdentifier = (
       ++parameterIndex;
     }
     if (content[index] === ")") {
-      // Ignore the next '(', it's a nested call
       ++parenthesisDepth;
       --index;
       continue;
@@ -121,21 +119,16 @@ export const findFunctionIdentifier = (
         continue;
       }
 
-      // Identifier preceding this '(' is the function we are looking for
-      // Skip all whitespaces first
       while (isWhitespace(content[--index])) {}
-      // Copy the identifier
       while (index >= 0 && isAlphaNum(content[index])) {
         identifier += content[index];
         --index;
       }
-      // Remove all digits from the end, an identifier can't start with a digit
       let identIndex = identifier.length;
       while (--identIndex >= 0 && isDigit(identifier[identIndex])) {}
       if (identIndex !== identifier.length - 1) {
         identifier = identifier.substring(0, identIndex + 1);
       }
-      // Finally reverse it and return it
       return {
         identifier: reverse(identifier),
         parameterIndex: parameterIndex,
