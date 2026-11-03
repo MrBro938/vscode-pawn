@@ -102,4 +102,41 @@ assert.deepEqual(
   "an unindexed standalone file should form its own compilation unit"
 );
 
+const { analyzePawn, getBoundOccurrences } = require("../out/server/analysis.js");
+
+const analysisByUri = new Map([
+  [rootA, analyzePawn([
+    "new g_ModuleValue;",
+    "public OnGameModeInit() { g_ModuleValue = GetModuleValue(); }"
+  ].join("\n"))],
+  [rootB, analyzePawn([
+    "new g_ModuleValue;",
+    "public OnGameModeInit() { g_ModuleValue = GetModuleValue(); }"
+  ].join("\n"))],
+  [apiA, analyzePawn("stock GetModuleValue() { return 1; }")],
+  [apiB, analyzePawn("stock GetModuleValue() { return 2; }")],
+  [sideA, analyzePawn("stock UseSide() { return GetModuleValue(); }")],
+  [common, analyzePawn("stock UseCommon() { return GetModuleValue(); }")]
+]);
+
+const unitWorkspaceA = Array.from(unitA)
+  .filter((uri) => analysisByUri.has(uri))
+  .map((uri) => ({ uri, analysis: analysisByUri.get(uri) }));
+const targetFunction = analysisByUri.get(apiA).symbols.find(
+  (symbol) => symbol.kind === "function" && symbol.name === "GetModuleValue"
+);
+const linkedOccurrences = getBoundOccurrences(targetFunction, apiA, unitWorkspaceA);
+assert.ok(
+  linkedOccurrences.some((entry) => entry.uri === rootA),
+  "references should include the root gamemode"
+);
+assert.ok(
+  linkedOccurrences.some((entry) => entry.uri === sideA),
+  "references should include a sibling module connected through the same root"
+);
+assert.ok(
+  !linkedOccurrences.some((entry) => entry.uri === rootB || entry.uri === apiB),
+  "references must not leak into an independent compilation unit with the same names"
+);
+
 console.log("Pawn include graph tests passed.");
