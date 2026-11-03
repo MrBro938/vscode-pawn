@@ -221,58 +221,76 @@ connection.onDidChangeConfiguration(() => {
 });
 
 const getDocumentSymbols = (document: TextDocument): DocumentSymbol[] => {
-  const lines = document.getText().split(/\r?\n/);
+  const analysis = analyzePawn(document.getText());
   const symbols: DocumentSymbol[] = [];
-  const functionPattern = /^\s*(?:(?:public|stock|static|native|forward)\s+)*(?:[A-Za-z_][A-Za-z0-9_]*:\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/i;
-  const definePattern = /^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)/i;
-  const excludedNames = new Set([
-    "if", "else", "while", "for", "do", "switch", "case", "return",
-    "sizeof", "state", "new", "delete", "assert", "exit", "break",
-    "continue", "goto"
-  ]);
+  const enumParents = new Map<string, DocumentSymbol>();
 
-  lines.forEach((line, lineNumber) => {
-    const defineMatch = definePattern.exec(line);
-    if (defineMatch) {
-      const name = defineMatch[1];
-      const character = line.indexOf(name);
-      symbols.push({
-        name,
-        detail: "#define",
-        kind: SymbolKind.Constant,
-        range: {
-          start: { line: lineNumber, character: 0 },
-          end: { line: lineNumber, character: line.length },
-        },
-        selectionRange: {
-          start: { line: lineNumber, character },
-          end: { line: lineNumber, character: character + name.length },
-        },
-      });
-      return;
+  const createDocumentSymbol = (
+    symbol: PawnSymbol,
+    kind: SymbolKind
+  ): DocumentSymbol => {
+    const start = document.positionAt(symbol.start);
+    const end = document.positionAt(symbol.end);
+    return {
+      name: symbol.name,
+      detail: symbol.detail,
+      kind,
+      range: { start, end },
+      selectionRange: { start, end },
+    };
+  };
+
+  analysis.symbols
+    .filter((symbol) => symbol.kind === "enum")
+    .forEach((symbol) => {
+      const documentSymbol = createDocumentSymbol(symbol, SymbolKind.Enum);
+      documentSymbol.children = [];
+      enumParents.set(symbol.name, documentSymbol);
+      symbols.push(documentSymbol);
+    });
+
+  analysis.symbols.forEach((symbol) => {
+    let documentSymbol: DocumentSymbol | undefined;
+
+    switch (symbol.kind) {
+      case "function":
+        documentSymbol = createDocumentSymbol(symbol, SymbolKind.Function);
+        break;
+      case "macro":
+        documentSymbol = createDocumentSymbol(symbol, SymbolKind.Constant);
+        break;
+      case "global":
+        documentSymbol = createDocumentSymbol(symbol, SymbolKind.Variable);
+        break;
+      case "enumMember":
+        documentSymbol = createDocumentSymbol(symbol, SymbolKind.EnumMember);
+        break;
+      default:
+        return;
     }
 
-    const functionMatch = functionPattern.exec(line);
-    if (!functionMatch) return;
+    if (symbol.kind === "enumMember" && symbol.detail) {
+      const parent = enumParents.get(symbol.detail);
+      if (parent) {
+        parent.children = parent.children || [];
+        parent.children.push(documentSymbol);
+        return;
+      }
+    }
 
-    const name = functionMatch[1];
-    if (excludedNames.has(name.toLowerCase())) return;
-
-    const character = line.indexOf(name, functionMatch.index);
-    symbols.push({
-      name,
-      detail: line.trim(),
-      kind: SymbolKind.Function,
-      range: {
-        start: { line: lineNumber, character: 0 },
-        end: { line: lineNumber, character: line.length },
-      },
-      selectionRange: {
-        start: { line: lineNumber, character },
-        end: { line: lineNumber, character: character + name.length },
-      },
-    });
+    symbols.push(documentSymbol);
   });
+
+  const sortByPosition = (items: DocumentSymbol[]) => {
+    items.sort((left, right) =>
+      left.range.start.line - right.range.start.line ||
+      left.range.start.character - right.range.start.character
+    );
+    items.forEach((item) => {
+      if (item.children) sortByPosition(item.children);
+    });
+  };
+  sortByPosition(symbols);
 
   return symbols;
 };
