@@ -1,9 +1,9 @@
 import { join } from "path";
 import { readFile } from "fs";
 import * as vscode from "vscode";
-import * as VLC from "vscode-languageclient";
+import { LanguageClient, ServerOptions, TransportKind } from "vscode-languageclient/node";
 
-let client: VLC.LanguageClient;
+let client: LanguageClient;
 let clientReady = false;
 
 const pawnGlob = "**/*.{p,pwn,pawn,inc}";
@@ -80,16 +80,16 @@ export async function activate(context: vscode.ExtensionContext) {
   const serverModule = context.asAbsolutePath(join("out", "server", "server.js"));
   const debugOptions = { execArgv: ["--nolazy", "--inspect=6009"] };
 
-  const serverOptions: VLC.ServerOptions = {
-    run: { module: serverModule, transport: VLC.TransportKind.ipc },
+  const serverOptions: ServerOptions = {
+    run: { module: serverModule, transport: TransportKind.ipc },
     debug: {
       module: serverModule,
-      transport: VLC.TransportKind.ipc,
+      transport: TransportKind.ipc,
       options: debugOptions,
     },
   };
 
-  client = new VLC.LanguageClient(
+  client = new LanguageClient(
     "Pawn Client",
     "Pawn Server",
     serverOptions,
