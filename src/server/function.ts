@@ -22,6 +22,7 @@ export interface FindFunctionIdentifierResult {
 }
 
 export let functionTokens: Map<string, PawnFunction> = new Map();
+export const functionTokensByUri: Map<string, Map<string, PawnFunction>> = new Map();
 
 export const parseFunctions = (textDocument: TextDocument) => {
   const regex = /^(?:(forward|native|stock)\s+)?(\S+)\((.*?)\)/gm;
@@ -84,6 +85,13 @@ export const parseFunctions = (textDocument: TextDocument) => {
           const resOut = /:(.*)/gm.exec(m[2]);
           if (resOut) m[2] = resOut[1];
         }
+        let documentFunctions = functionTokensByUri.get(textDocument.uri);
+        if (!documentFunctions) {
+          documentFunctions = new Map<string, PawnFunction>();
+          functionTokensByUri.set(textDocument.uri, documentFunctions);
+        }
+        documentFunctions.set(m[2], pwnFun);
+
         const findSnip = functionTokens.get(m[2]);
         if (findSnip === undefined) functionTokens.set(m[2], pwnFun);
       }
