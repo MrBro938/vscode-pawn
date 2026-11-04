@@ -50,6 +50,8 @@ import {
   getCompilationUnitUris,
   PawnIncludeGraph,
   resolveIncludeUris,
+  getIncludedFileUris,
+  extractPawnIncludes,
 } from "./includeGraph";
 import { resolveIncludeConfiguration } from "./includeConfig";
 
@@ -60,6 +62,7 @@ const PARSE_DEBOUNCE_MS = 150;
 const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
 const completionCache = new Map<string, CompletionItem[]>();
 const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>();
+const indexedSymbolTexts = new Map<string, string>();
 let semanticTokensRefreshSupported = false;
 
 // Workspace include index. Each path suffix points to all matching files,
@@ -91,6 +94,21 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
 
   try {
     const filePath = path.resolve(fileURLToPath(uri));
+    const previousText = indexedPawnTexts.get(uri);
+    const textChanged = text !== undefined && previousText !== text;
+    const includeGraphChanged = textChanged && (
+      previousText === undefined ||
+      JSON.stringify(extractPawnIncludes(previousText)) !==
+        JSON.stringify(extractPawnIncludes(text))
+    );
+
+    if (textChanged) {
+      indexedSymbolTexts.delete(uri);
+      analysisCache.delete(uri);
+      removeDocumentSymbols(uri);
+      completionCache.clear();
+    }
+
     indexedPawnFiles.set(uri, filePath);
     if (text !== undefined) indexedPawnTexts.set(uri, text);
 
@@ -108,7 +126,9 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
       matches.add(uri);
     }
 
-    if (rebuildGraph) rebuildIncludeGraph();
+    if (rebuildGraph && (previousText === undefined || includeGraphChanged)) {
+      rebuildIncludeGraph();
+    }
   } catch {
     // Ignore malformed or unsupported URIs.
   }
@@ -120,6 +140,10 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
 
   indexedPawnFiles.delete(uri);
   indexedPawnTexts.delete(uri);
+  indexedSymbolTexts.delete(uri);
+  analysisCache.delete(uri);
+  removeDocumentSymbols(uri);
+  completionCache.clear();
   const parts = filePath.split(path.sep);
 
   for (let index = 0; index < parts.length; index++) {
@@ -196,7 +220,6 @@ const scanIncludeDirectory = (
       try {
         const text = fs.readFileSync(absolutePath, "utf8");
         indexPawnFile(uri, text, false);
-        collectSymbols(TextDocument.create(uri, "pawn", 1, text), false);
         configuredIncludeFileUris.add(uri);
         indexedCount++;
       } catch {
@@ -272,15 +295,26 @@ const removeDocumentSymbols = (uri: string) => {
 };
 
 const collectSymbols = (textDocument: TextDocument, includeWords = true) => {
+  const text = textDocument.getText();
   removeDocumentSymbols(textDocument.uri);
   parseDefinitions(textDocument);
   parseFunctions(textDocument);
   if (includeWords) parseWords(textDocument);
   analysisCache.set(textDocument.uri, {
-    text: textDocument.getText(),
-    analysis: analyzePawn(textDocument.getText()),
+    text,
+    analysis: analyzePawn(text),
   });
+  indexedSymbolTexts.set(textDocument.uri, text);
   completionCache.clear();
+};
+
+const ensureSymbolsIndexed = (uri: string) => {
+  const text = getDocumentText(uri);
+  if (text === undefined || indexedSymbolTexts.get(uri) === text) return;
+
+  const document = documents.get(uri) ||
+    TextDocument.create(uri, "pawn", 1, text);
+  collectSymbols(document, documents.get(uri) !== undefined);
 };
 
 const scheduleCollectSymbols = (
@@ -293,7 +327,7 @@ const scheduleCollectSymbols = (
 
   const timer = setTimeout(() => {
     pendingParses.delete(uri);
-    collectSymbols(textDocument);
+    ensureSymbolsIndexed(uri);
 
     // A reopened document can retain stale semantic-token state in the editor.
     // Ask the client for a fresh full token response after its analysis is ready.
@@ -321,33 +355,33 @@ documents.onDidClose((event) => {
   const pending = pendingParses.get(event.document.uri);
   if (pending) clearTimeout(pending);
   pendingParses.delete(event.document.uri);
-  removeDocumentSymbols(event.document.uri);
-  analysisCache.delete(event.document.uri);
-  completionCache.clear();
+
+  // Keep the cached file snapshot and symbols when a tab closes. The file is
+  // still part of the workspace, and re-opening it should not force a reparse.
 });
 
 connection.onNotification(
   "pawn/indexFiles",
-  (params: { files?: Array<{ uri: string; text: string }>; deleted?: string[] }) => {
+  (params: {
+    files?: Array<{ uri: string; text: string }>;
+    deleted?: string[];
+    deferGraphRebuild?: boolean;
+  }) => {
     if (params.deleted) {
       params.deleted.forEach((uri) => {
         unindexPawnFile(uri, false);
-        analysisCache.delete(uri);
-        removeDocumentSymbols(uri);
       });
     }
 
     if (params.files) {
       params.files.forEach((file) => {
         indexPawnFile(file.uri, file.text, false);
-        const document = TextDocument.create(file.uri, "pawn", 1, file.text);
-        collectSymbols(document, false);
       });
     }
 
     if ((params.deleted && params.deleted.length > 0) ||
         (params.files && params.files.length > 0)) {
-      rebuildIncludeGraph();
+      if (!params.deferGraphRebuild) rebuildIncludeGraph();
       completionCache.clear();
     }
   }
@@ -473,6 +507,7 @@ const buildCompletionItems = (uri: string): CompletionItem[] => {
 
   const visibleUris = getCompilationUnitUris(uri, includeGraph);
   visibleUris.forEach((visibleUri) => {
+    ensureSymbolsIndexed(visibleUri);
     functionTokensByUri.get(visibleUri)?.forEach((res) => add(res.completion));
     definitionTokens.get(visibleUri)?.forEach((res) => add(res.completion));
   });
@@ -658,7 +693,15 @@ connection.languages.semanticTokens.on((params) => {
   const analysis = getAnalysis(document.uri);
   if (!analysis) return { data: [] };
 
-  const workspace = getWorkspaceAnalyses(document.uri);
+  // Semantic coloring only needs declarations from this file and the
+  // files it actually includes. Walking the full compilation unit also pulls
+  // in every sibling module and can expand to thousands of YSI files.
+  const workspace: WorkspacePawnAnalysis[] = [];
+  getIncludedFileUris(document.uri, includeGraph).forEach((uri) => {
+    const includedAnalysis = getAnalysis(uri);
+    if (includedAnalysis) workspace.push({ uri, analysis: includedAnalysis });
+  });
+
   const projectKinds = new Map<string, PawnSymbol["kind"]>();
   workspace.forEach((entry) => {
     entry.analysis.symbols.forEach((symbol) => {
@@ -783,6 +826,7 @@ const getFunctionInCompilationUnit = (
 ) => {
   const visibleUris = getCompilationUnitUris(uri, includeGraph);
   for (const visibleUri of visibleUris) {
+    ensureSymbolsIndexed(visibleUri);
     const found = functionTokensByUri.get(visibleUri)?.get(identifier);
     if (found) return found;
   }
@@ -795,6 +839,7 @@ const getDefinitionInCompilationUnit = (
 ) => {
   const visibleUris = getCompilationUnitUris(uri, includeGraph);
   for (const visibleUri of visibleUris) {
+    ensureSymbolsIndexed(visibleUri);
     const found = definitionTokens.get(visibleUri)?.find(
       (definition) => definition.completion.label === identifier
     );
