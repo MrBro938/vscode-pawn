@@ -452,3 +452,32 @@ assert.equal(
   true,
   "token offsets must continue to map to exact source slices"
 );
+
+
+const commentAwareInferenceSource = [
+  "new Float:g_CommentAwareSource = 1.0;",
+  "stock ReadCommentAware() {",
+  "    new localValue = ( /* ignored */ g_CommentAwareSource );",
+  "    return ( /* ignored */ g_CommentAwareSource );",
+  "}"
+].join("\n");
+const commentAwareInference = analyzePawn(commentAwareInferenceSource);
+assert.equal(
+  commentAwareInference.symbols.find((symbol) =>
+    symbol.name === "localValue" && symbol.kind === "local"
+  )?.inferredTag,
+  "Float",
+  "inference from existing token ranges must ignore comments inside expressions"
+);
+assert.equal(
+  commentAwareInference.symbols.find((symbol) =>
+    symbol.name === "ReadCommentAware" && symbol.kind === "function"
+  )?.inferredTag,
+  "Float",
+  "function return inference must reuse existing tokens and retain outer-parenthesis handling"
+);
+assert.equal(
+  inferPawnExpressionTag("( /* ignored */ 1.25 )", []),
+  "Float",
+  "public expression inference must preserve comment and parenthesis handling"
+);

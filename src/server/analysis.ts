@@ -357,7 +357,11 @@ export const analyzePawn = (
   const tokens = pretokenizedTokens || tokenizePawn(text);
   const symbols: PawnSymbol[] = [];
   const functions: FunctionRegion[] = [];
-  const pendingInitializers: Array<{ symbol: PawnSymbol; expression: string }> = [];
+  const pendingInitializers: Array<{
+    symbol: PawnSymbol;
+    startTokenIndex: number;
+    endTokenIndex: number;
+  }> = [];
   const bracePairs = new Map<number, number>();
   const braceStack: number[] = [];
   const braceDepths: number[] = [];
@@ -673,7 +677,11 @@ export const analyzePawn = (
       };
       addSymbol(symbols, variableSymbol);
       if (!declared.tag && initializer) {
-        pendingInitializers.push({ symbol: variableSymbol, expression: initializer });
+        pendingInitializers.push({
+          symbol: variableSymbol,
+          startTokenIndex: equalsIndex + 1,
+          endTokenIndex: declEnd,
+        });
       }
     });
 
@@ -689,9 +697,16 @@ export const analyzePawn = (
   for (let pass = 0; pass < inferencePassLimit; pass++) {
     let changed = false;
 
-    pendingInitializers.forEach(({ symbol, expression }) => {
+    pendingInitializers.forEach(({ symbol, startTokenIndex, endTokenIndex }) => {
       if (symbol.tag || symbol.inferredTag) return;
-      const inferred = inferPawnExpressionTag(expression, symbols, symbol.start, symbolIndex);
+      const inferred = inferPawnTokenRangeTag(
+        tokens,
+        startTokenIndex,
+        endTokenIndex,
+        symbols,
+        symbol.start,
+        symbolIndex
+      );
       if (inferred) {
         symbol.inferredTag = inferred;
         changed = true;
@@ -704,7 +719,11 @@ export const analyzePawn = (
       );
       if (!functionSymbol || functionSymbol.tag || functionSymbol.inferredTag) return;
 
-      const returnExpressions: Array<{ expression: string; offset: number }> = [];
+      const returnExpressions: Array<{
+        startTokenIndex: number;
+        endTokenIndex: number;
+        offset: number;
+      }> = [];
       // Scan only this function body rather than rescanning every token for
       // every function in the file.
       for (let index = region.openToken + 1; index < region.closeToken; index++) {
@@ -723,16 +742,26 @@ export const analyzePawn = (
         ) end++;
         if (end > index + 1) {
           returnExpressions.push({
-            expression: text.slice(tokens[index + 1].start, tokens[end - 1].end),
+            startTokenIndex: index + 1,
+            endTokenIndex: end,
             offset: token.start,
           });
         }
       }
 
       if (returnExpressions.length === 0) return;
-      const inferred = returnExpressions.map(({ expression, offset }) =>
-        inferPawnExpressionTag(expression, symbols, offset, symbolIndex)
-      );
+      const inferred = returnExpressions.map(({
+        startTokenIndex,
+        endTokenIndex,
+        offset,
+      }) => inferPawnTokenRangeTag(
+        tokens,
+        startTokenIndex,
+        endTokenIndex,
+        symbols,
+        offset,
+        symbolIndex
+      ));
       const firstTag = inferred[0];
       if (firstTag && inferred.every((tag) => tag === firstTag)) {
         functionSymbol.inferredTag = firstTag;
@@ -764,19 +793,17 @@ const buildPawnSymbolIndex = (symbols: readonly PawnSymbol[]): PawnSymbolIndex =
  * lightweight IntelliSense aid, not a replacement for Pawn compiler checks.
  * Pass a prebuilt symbol index from analyzePawn to avoid rescanning all symbols.
  */
-export const inferPawnExpressionTag = (
-  expression: string,
+const inferPawnExpressionTokens = (
+  initialTokens: PawnToken[],
   symbols: readonly PawnSymbol[],
-  offset = Number.MAX_SAFE_INTEGER,
-  symbolIndex: PawnSymbolIndex = buildPawnSymbolIndex(symbols)
+  offset: number,
+  symbolIndex: PawnSymbolIndex
 ): string | undefined => {
-  let source = expression.trim();
-  if (!source) return undefined;
-
-  let tokens = tokenizePawn(source).filter((token) => token.kind !== "comment");
+  let tokens = initialTokens;
   if (tokens.length === 0) return undefined;
 
-  // Remove redundant outer parentheses.
+  // Remove redundant outer parentheses by slicing the already-tokenized
+  // expression. Re-lexing the shorter source for every nested pair is wasteful.
   while (tokens[0]?.value === "(" && tokens[tokens.length - 1]?.value === ")") {
     let depth = 0;
     let closesAtEnd = false;
@@ -791,9 +818,10 @@ export const inferPawnExpressionTag = (
       }
     }
     if (!closesAtEnd) break;
-    source = source.slice(tokens[0].end, tokens[tokens.length - 1].start).trim();
-    tokens = tokenizePawn(source).filter((token) => token.kind !== "comment");
+    tokens = tokens.slice(1, -1);
   }
+
+  if (tokens.length === 0) return undefined;
 
   if (tokens.length === 1) {
     const token = tokens[0];
@@ -876,6 +904,36 @@ export const inferPawnExpressionTag = (
   }
 
   return undefined;
+};
+
+const inferPawnTokenRangeTag = (
+  sourceTokens: PawnToken[],
+  startTokenIndex: number,
+  endTokenIndex: number,
+  symbols: readonly PawnSymbol[],
+  offset: number,
+  symbolIndex: PawnSymbolIndex
+): string | undefined => {
+  const expressionTokens = sourceTokens
+    .slice(startTokenIndex, endTokenIndex)
+    .filter((token) => token.kind !== "comment");
+  return inferPawnExpressionTokens(expressionTokens, symbols, offset, symbolIndex);
+};
+
+/**
+ * Infer tags only when the expression provides a clear answer. This is a
+ * lightweight IntelliSense aid, not a replacement for Pawn compiler checks.
+ * Pass a prebuilt symbol index from analyzePawn to avoid rescanning all symbols.
+ */
+export const inferPawnExpressionTag = (
+  expression: string,
+  symbols: readonly PawnSymbol[],
+  offset = Number.MAX_SAFE_INTEGER,
+  symbolIndex: PawnSymbolIndex = buildPawnSymbolIndex(symbols)
+): string | undefined => {
+  const tokens = tokenizePawn(expression)
+    .filter((token) => token.kind !== "comment");
+  return inferPawnExpressionTokens(tokens, symbols, offset, symbolIndex);
 };
 
 export const resolvePawnSymbol = (
