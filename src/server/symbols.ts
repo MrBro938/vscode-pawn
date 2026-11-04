@@ -13,7 +13,7 @@ export interface PawnToken {
  * whitespace keeps the same ECMAScript \s behavior as the original lexer.
  */
 const isPawnWhitespace = (code: number): boolean => {
-  if (code <= 0x20) return code >= 0x09;
+  if (code === 0x20 || (code >= 0x09 && code <= 0x0d)) return true;
   return code === 0x00a0 ||
     code === 0x1680 ||
     (code >= 0x2000 && code <= 0x200a) ||
@@ -35,7 +35,11 @@ const isIdentifierPart = (code: number): boolean =>
   isIdentifierStart(code) || (code >= 0x30 && code <= 0x39);
 
 const isNumberPart = (code: number): boolean =>
-  isIdentifierPart(code) || code === 0x2e;
+  (code >= 0x41 && code <= 0x5a) ||
+  (code >= 0x61 && code <= 0x7a) ||
+  (code >= 0x30 && code <= 0x39) ||
+  code === 0x5f ||
+  code === 0x2e;
 
 /**
  * Lightweight Pawn lexer shared by references, rename and semantic tokens.
