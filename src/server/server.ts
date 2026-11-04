@@ -58,6 +58,7 @@ import {
   buildPawnIncludeGraph,
   PawnIncludeGraph,
   resolveIncludeUris,
+  getIncludedFileUris,
   extractPawnIncludes,
   updatePawnIncludeGraph,
   normalizePawnPath,
