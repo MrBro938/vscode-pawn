@@ -1,7 +1,7 @@
 {
     "name": "vscode-pawn",
-    "displayName": "Pawn Tools",
-    "description": "Pawn tools for vscode. Includes syntax highlighting and snippets/completions for common libraries.",
+    "displayName": "%extension.displayName%",
+    "description": "%extension.description%",
     "version": "1.0.0",
     "publisher": "southclaws",
     "engines": {
@@ -112,27 +112,27 @@
         "commands": [
             {
                 "command": "extension.packageEnsure",
-                "title": "Ensure Package Dependencies"
+                "title": "%command.packageEnsure%"
             },
             {
                 "command": "extension.packageBuild",
-                "title": "Build Pawn Package"
+                "title": "%command.packageBuild%"
             },
             {
                 "command": "pawn.showPerformanceStats",
-                "title": "Pawn: Show Performance Statistics"
+                "title": "%command.showPerformanceStats%"
             },
             {
                 "command": "pawn.togglePerformanceLogging",
-                "title": "Pawn: Toggle Performance Logging"
+                "title": "%command.togglePerformanceLogging%"
             },
             {
                 "command": "pawn.resetPerformanceStats",
-                "title": "Pawn: Reset Performance Statistics"
+                "title": "%command.resetPerformanceStats%"
             }
         ],
         "configuration": {
-            "title": "Pawn Tools",
+            "title": "%configuration.title%",
             "properties": {
                 "pawn.includePaths": {
                     "type": "array",
@@ -140,17 +140,17 @@
                         "type": "string"
                     },
                     "default": [],
-                    "description": "Additional Pawn include directories. Relative paths are resolved from each workspace folder."
+                    "description": "%setting.includePaths.description%"
                 },
                 "pawn.compilerPath": {
                     "type": "string",
                     "default": "",
-                    "description": "Path to the Pawn compiler executable or its directory. Used to locate the adjacent pawn.cfg and standard include directory."
+                    "description": "%setting.compilerPath.description%"
                 },
                 "pawn.performanceLogging": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Collect local performance statistics for workspace indexing, Pawn analysis, semantic tokens and IntelliSense requests."
+                    "description": "%setting.performanceLogging.description%"
                 },
                 "pawn.functionSearchScope": {
                     "type": "string",
@@ -160,12 +160,12 @@
                         "workspace"
                     ],
                     "enumDescriptions": [
-                        "Fastest: search the current file and files it includes recursively. Standard functions such as SetPlayerPos are found through a_samp.inc when it is included.",
-                        "Search the current file, its includes, and files that include it.",
-                        "Search every indexed Pawn file in the workspace and configured include directories. This can be slower in large projects."
+                        "%setting.functionSearchScope.includes%",
+                        "%setting.functionSearchScope.compilationUnit%",
+                        "%setting.functionSearchScope.workspace%"
                     ],
                     "default": "includes",
-                    "description": "Controls which files are searched for cross-file functions, native declarations and symbols in Completion, Hover, Go to Definition and Signature Help."
+                    "description": "%setting.functionSearchScope.description%"
                 }
             }
         }
