@@ -373,7 +373,7 @@ connection.onNotification(
 );
 
 connection.onDidChangeConfiguration(() => {
-  documents.all().forEach(scheduleCollectSymbols);
+  documents.all().forEach((document) => scheduleCollectSymbols(document));
 });
 
 const getDocumentSymbols = (document: TextDocument): DocumentSymbol[] => {
