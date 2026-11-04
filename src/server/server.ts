@@ -34,6 +34,7 @@ import {
   functionTokens,
   functionTokensByUri,
   findFunctionIdentifier,
+  PawnFunction,
 } from "./function";
 import {
   buildPawnCompletionItems,
@@ -49,7 +50,11 @@ import {
   formatPawnSymbolHover,
   getPawnSignatureParameters,
 } from "./symbolDisplay";
-import { definitionTokens, parseDefinitions } from "./definition";
+import { definitionTokens, parseDefinitions, PawnDefinition } from "./definition";
+import {
+  buildPawnFunctionSearchIndex,
+  FunctionSearchIndexCache,
+} from "./functionSearchIndex";
 import { isPawnFunctionInvocation, tokenizePawn } from "./symbols";
 import {
   analyzePawn,
@@ -120,6 +125,9 @@ const markCompletionSourceStale = (uri: string) => {
   });
 };
 const indexedSymbolTexts = new Map<string, string>();
+const functionSearchIndexCache =
+  new FunctionSearchIndexCache<PawnFunction, PawnDefinition>(8);
+const invalidateFunctionSearchIndexes = () => functionSearchIndexCache.clear();
 let semanticTokensRefreshSupported = false;
 
 interface SemanticTokensProjectSymbols extends SemanticTokensDependencySnapshot<PawnAnalysis> {
@@ -227,6 +235,7 @@ const setFunctionSearchScope = (scope?: string) => {
 
   configuredFunctionSearchScope = nextScope;
   invalidateCompletionSources();
+  invalidateFunctionSearchIndexes();
 };
 
 const rebuildIncludeGraph = () => performanceStats.measure(
@@ -234,6 +243,7 @@ const rebuildIncludeGraph = () => performanceStats.measure(
   () => {
     semanticTokensGraphGeneration++;
     invalidateCompletionSources();
+    invalidateFunctionSearchIndexes();
     includeGraph = buildPawnIncludeGraph(
       indexedPawnFiles,
       indexedPawnTexts,
@@ -266,6 +276,14 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
     if (textChanged) {
       bumpSemanticTokensFileVersion(uri);
       markCompletionSourceStale(uri);
+      const invalidatedFunctionIndexes =
+        functionSearchIndexCache.markSourceStale(uri);
+      if (invalidatedFunctionIndexes > 0) {
+        performanceStats.count(
+          "hover.functionIndexInvalidations",
+          invalidatedFunctionIndexes
+        );
+      }
       if (includeGraphChanged) invalidateCompletionSources();
       indexedSymbolTexts.delete(uri);
       analysisCache.delete(uri);
@@ -669,6 +687,7 @@ connection.onNotification(
           });
           if (changedIncludeSources.size > 0) {
             semanticTokensGraphGeneration++;
+            invalidateFunctionSearchIndexes();
           }
         }
       }
@@ -1430,41 +1449,50 @@ connection.onHover((params: TextDocumentPositionParams): Hover | undefined =>
   })
 );
 
-const getFunctionInSearchScope = (
-  uri: string,
-  identifier: string
-) => {
-  const visibleUris = getFunctionSearchUris(uri);
-  performanceStats.count("hover.functionFilesVisited", visibleUris.size);
-  for (const visibleUri of visibleUris) {
+const getFunctionSearchIndex = (uri: string) => {
+  const cached = functionSearchIndexCache.get(uri);
+  if (cached) {
+    performanceStats.count("hover.functionIndexCacheHits");
+    return cached;
+  }
+
+  performanceStats.count("hover.functionIndexCacheMisses");
+  const visibleUris = Array.from(getFunctionSearchUris(uri));
+  performanceStats.count("hover.functionFilesVisited", visibleUris.length);
+
+  visibleUris.forEach((visibleUri) => {
     performanceStats.measure(
       "hover.functionEnsureSymbols",
       () => ensureSymbolsIndexed(visibleUri)
     );
-    const functions = functionTokensByUri.get(visibleUri);
-    if (!functions) continue;
-    const found = Array.from(functions.entries()).find(
-      ([name]) => name.toLowerCase() === identifier.toLowerCase()
-    )?.[1];
-    if (found) return found;
+  });
+
+  const index = buildPawnFunctionSearchIndex(
+    visibleUris,
+    (visibleUri) => functionTokensByUri.get(visibleUri)?.entries(),
+    (visibleUri) => definitionTokens.get(visibleUri),
+    (definition) => definition.completion.label
+  );
+
+  performanceStats.count("hover.functionIndexFunctions", index.functions.size);
+  performanceStats.count("hover.functionIndexDefinitions", index.definitions.size);
+  if (functionSearchIndexCache.set(uri, index)) {
+    performanceStats.count("hover.functionIndexCacheEvictions");
   }
-  return undefined;
+  return index;
 };
+
+const getFunctionInSearchScope = (
+  uri: string,
+  identifier: string
+): PawnFunction | undefined =>
+  getFunctionSearchIndex(uri).functions.get(identifier.toLowerCase());
 
 const getDefinitionInSearchScope = (
   uri: string,
   identifier: string
-) => {
-  const visibleUris = getFunctionSearchUris(uri);
-  for (const visibleUri of visibleUris) {
-    ensureSymbolsIndexed(visibleUri);
-    const found = definitionTokens.get(visibleUri)?.find(
-      (definition) => definition.completion.label === identifier
-    );
-    if (found) return found;
-  }
-  return undefined;
-};
+): PawnDefinition | undefined =>
+  getFunctionSearchIndex(uri).definitions.get(identifier);
 
 const doHover = (
   document: TextDocument,

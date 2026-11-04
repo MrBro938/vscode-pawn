@@ -174,7 +174,7 @@
         "vscode:prepublish": "npm run compile",
         "compile": "tsc -p ./",
         "watch": "tsc -watch -p ./",
-        "test": "npm run compile && node test/analysis.test.cjs && node test/completion.test.cjs && node test/completionSourceCache.test.cjs && node test/semanticTokensCache.test.cjs && node test/includeGraph.test.cjs && node test/includeConfig.test.cjs && node test/performance.test.cjs"
+        "test": "npm run compile && node test/analysis.test.cjs && node test/completion.test.cjs && node test/completionSourceCache.test.cjs && node test/semanticTokensCache.test.cjs && node test/functionSearchIndex.test.cjs && node test/includeGraph.test.cjs && node test/includeConfig.test.cjs && node test/performance.test.cjs"
     },
     "devDependencies": {
         "typescript": "^7.0.2",
