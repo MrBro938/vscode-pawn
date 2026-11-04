@@ -138,6 +138,90 @@ try {
     "compiler directory should be recognized from pawn.json and compilerPath"
   );
 
+  // sampctl's pawn.yaml manifest should feed the same include configuration.
+  mkdir("yaml-project/src/includes");
+  mkdir("yaml-project/build/includes");
+  mkdir("yaml-project/args/includes");
+  mkdir("yaml-project/pawno/include");
+  mkdir("yaml-project/dependencies/YSI-Includes/include");
+  mkdir("yaml-project/dependencies/samp-stdlib");
+
+  write("yaml-project/pawn.yaml", [
+    "# A normal sampctl YAML package definition",
+    "entry: gamemodes/main.pwn",
+    "include_path: src/includes",
+    "dependencies:",
+    "  - pawn-lang/samp-stdlib",
+    "  - pawn-lang/YSI-Includes",
+    "build:",
+    "  includes:",
+    "    - build/includes",
+    "  args:",
+    '    - "-iargs/includes"',
+    '    - "-O2"',
+    "  compiler:",
+    "    path: pawno"
+  ].join("\n"));
+
+  write("yaml-project/dependencies/YSI-Includes/pawn.yaml", [
+    "include_path: include"
+  ].join("\n"));
+  write("yaml-project/dependencies/samp-stdlib/pawn.yaml", [
+    "dependencies: []"
+  ].join("\n"));
+
+  const yamlResult = resolveIncludeConfiguration({
+    workspaceRoots: [path.join(temporaryRoot, "yaml-project")]
+  });
+  const yamlDirectories = asSet(yamlResult.includeDirectories);
+  [
+    "yaml-project",
+    "yaml-project/src/includes",
+    "yaml-project/build/includes",
+    "yaml-project/args/includes",
+    "yaml-project/pawno/include",
+    "yaml-project/dependencies/YSI-Includes/include",
+    "yaml-project/dependencies/samp-stdlib"
+  ].forEach((relative) => {
+    assert.ok(
+      yamlDirectories.has(path.resolve(temporaryRoot, relative)),
+      "pawn.yaml configuration should contain " + relative
+    );
+  });
+
+  const yamlOrdered = yamlResult.includeDirectories.map((directory) => path.resolve(directory));
+  const yamlPosition = (relative) =>
+    yamlOrdered.indexOf(path.resolve(temporaryRoot, "yaml-project", relative));
+  assert.ok(
+    yamlPosition("build/includes") < yamlPosition("dependencies/samp-stdlib"),
+    "YAML build includes should take precedence over dependency includes"
+  );
+  assert.ok(
+    yamlPosition("dependencies/samp-stdlib") <
+      yamlPosition("dependencies/YSI-Includes/include"),
+    "YAML dependencies should retain their declared order"
+  );
+
+  // Existing JSON projects remain authoritative if both manifest files exist.
+  mkdir("both-manifests/json/includes");
+  mkdir("both-manifests/yaml/includes");
+  write("both-manifests/pawn.json", JSON.stringify({
+    include_path: "json/includes"
+  }));
+  write("both-manifests/pawn.yaml", "include_path: yaml/includes\n");
+  const bothResult = resolveIncludeConfiguration({
+    workspaceRoots: [path.join(temporaryRoot, "both-manifests")]
+  });
+  const bothDirectories = asSet(bothResult.includeDirectories);
+  assert.ok(
+    bothDirectories.has(path.resolve(temporaryRoot, "both-manifests/json/includes")),
+    "pawn.json should retain precedence when both manifests exist"
+  );
+  assert.ok(
+    !bothDirectories.has(path.resolve(temporaryRoot, "both-manifests/yaml/includes")),
+    "pawn.yaml should not override an existing valid pawn.json"
+  );
+
   console.log("Pawn include configuration tests passed.");
 } finally {
   fs.rmSync(temporaryRoot, { recursive: true, force: true });
