@@ -362,7 +362,8 @@ connection.onDidChangeConfiguration(() => {
 });
 
 const getDocumentSymbols = (document: TextDocument): DocumentSymbol[] => {
-  const analysis = analyzePawn(document.getText());
+  const analysis = getAnalysis(document.uri);
+  if (!analysis) return [];
   const symbols: DocumentSymbol[] = [];
   const enumParents = new Map<string, DocumentSymbol>();
 
