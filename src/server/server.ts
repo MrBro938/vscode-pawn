@@ -35,7 +35,11 @@ import {
   functionTokensByUri,
   findFunctionIdentifier,
 } from "./function";
-import { buildPawnCompletionItems, PawnCompletionSource } from "./completion";
+import {
+  buildPawnCompletionItems,
+  getPawnMacroSignature,
+  PawnCompletionSource,
+} from "./completion";
 import { definitionTokens, parseDefinitions } from "./definition";
 import { tokenizePawn } from "./symbols";
 import {
@@ -953,6 +957,21 @@ const doHover = (
     return { contents };
   }
 
+  const macro = findFunctionSymbolInIncludeClosure(
+    document.uri,
+    result.identifier
+  );
+  if (macro?.symbol.kind === "macro") {
+    const contents: MarkedString[] = [
+      macro.symbol.detail || macro.symbol.name,
+    ];
+    if (macro.symbol.documentation) contents.push(macro.symbol.documentation);
+    if (macro.symbol.macroReplacement) {
+      contents.push("Expands to: " + macro.symbol.macroReplacement);
+    }
+    return { contents };
+  }
+
   const definition = getDefinitionInCompilationUnit(
     document.uri,
     result.identifier
@@ -980,7 +999,7 @@ const findFunctionSymbolInIncludeClosure = (
     const analysis = getAnalysis(visibleUri);
     if (!analysis) continue;
     const symbol = analysis.symbols.find((candidate) =>
-      candidate.kind === "function" &&
+      (candidate.kind === "function" || candidate.kind === "macro") &&
       candidate.name.toLowerCase() === identifier.toLowerCase()
     );
     if (symbol) return { analysis, symbol };
@@ -1060,9 +1079,12 @@ const doSignHelp = (
   const snip = getFunctionInCompilationUnit(document.uri, result.identifier);
   if (!resolved && !snip) return undefined;
 
-  const parameters = resolved
+  const macroSignature = resolved?.symbol.kind === "macro"
+    ? getPawnMacroSignature(resolved.symbol)
+    : undefined;
+  const parameters = macroSignature?.parameters || (resolved
     ? getFunctionSignatureParameters(resolved.analysis, resolved.symbol)
-    : snip?.params || [];
+    : snip?.params || []);
 
   return {
     activeParameter: parameters.length > 0
@@ -1070,9 +1092,12 @@ const doSignHelp = (
       : 0,
     activeSignature: 0,
     signatures: [{
-      label: resolved?.symbol.detail || snip?.completion.label || result.identifier,
+      label: macroSignature?.label ||
+        resolved?.symbol.detail ||
+        snip?.completion.label ||
+        result.identifier,
       parameters,
-      documentation: snip?.completion.documentation,
+      documentation: macroSignature?.documentation || snip?.completion.documentation,
     }],
   };
 };
