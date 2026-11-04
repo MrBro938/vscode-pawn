@@ -350,8 +350,34 @@ const extractPawnMacroSymbols = (
   return symbols;
 };
 
-export const analyzePawn = (text: string): PawnAnalysis => {
+export type PawnAnalysisPhase =
+  | "tokenize"
+  | "delimiters"
+  | "functions"
+  | "enums"
+  | "macros"
+  | "variables"
+  | "tagInference";
+
+export type PawnAnalysisPerformanceCallback = (
+  phase: PawnAnalysisPhase,
+  durationMs: number
+) => void;
+
+export const analyzePawn = (
+  text: string,
+  onPerformance?: PawnAnalysisPerformanceCallback
+): PawnAnalysis => {
+  let previousPhaseAt = onPerformance ? performance.now() : 0;
+  const recordPhase = (phase: PawnAnalysisPhase) => {
+    if (!onPerformance) return;
+    const now = performance.now();
+    onPerformance(phase, now - previousPhaseAt);
+    previousPhaseAt = now;
+  };
+
   const tokens = tokenizePawn(text);
+  recordPhase("tokenize");
   const symbols: PawnSymbol[] = [];
   const functions: FunctionRegion[] = [];
   const pendingInitializers: Array<{ symbol: PawnSymbol; expression: string }> = [];
@@ -409,6 +435,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
       matchedBraceStack.push(index);
     }
   });
+  recordPhase("delimiters");
 
   const functionModifierTokenIndexes = new Set<number>();
 
@@ -508,6 +535,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
       });
     });
   }
+  recordPhase("functions");
 
   // Register enum names and their members.
   for (let index = 0; index < tokens.length; index++) {
@@ -568,9 +596,11 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     });
     index = close;
   }
+  recordPhase("enums");
 
   // Register Pawn #define macros, including positional parameters and patterns.
   extractPawnMacroSymbols(text, tokens).forEach((symbol) => addSymbol(symbols, symbol));
+  recordPhase("macros");
 
   // Function regions are discovered in source order. Advance one cursor while
   // scanning declarations instead of filtering and sorting all functions per
@@ -676,6 +706,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
 
     index = statementEnd;
   }
+  recordPhase("variables");
 
   // Index symbols once; inference runs repeatedly but lookups stay O(1) by name.
   const symbolIndex = buildPawnSymbolIndex(symbols);
@@ -739,6 +770,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
 
     if (!changed) break;
   }
+  recordPhase("tagInference");
 
   return { text, tokens, symbols };
 };
