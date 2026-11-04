@@ -8,7 +8,7 @@ let clientReady = false;
 
 const pawnGlob = "**/*.{p,pwn,pawn,inc}";
 const excludedGlob = "**/{.git,node_modules,.vscode-test,dist,out}/**";
-const INDEX_BATCH_SIZE = 4;
+const INDEX_BATCH_SIZE = 32;
 
 const readFileBytes = (uri: vscode.Uri): Promise<Buffer> =>
   new Promise((resolve, reject) => {
@@ -68,11 +68,16 @@ const indexWorkspaceFiles = async () => {
     );
 
     if (validFiles.length > 0) {
-      await client.sendNotification("pawn/indexFiles", { files: validFiles });
+      await client.sendNotification("pawn/indexFiles", {
+        files: validFiles,
+        deferGraphRebuild: true,
+      });
     }
 
     // Yield to the extension host between small batches.
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    // Keep the extension host responsive without adding a large fixed delay
+    // for every tiny batch in workspaces containing thousands of Pawn files.
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
 };
 
