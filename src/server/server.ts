@@ -362,11 +362,28 @@ const removeDocumentSymbols = (uri: string) => {
   definitionTokens.delete(uri);
 };
 
-const analyzePawnMeasured = (text: string): PawnAnalysis => {
+const analyzePawnMeasured = (uri: string, text: string): PawnAnalysis => {
+  const startedAt = performanceStats.isEnabled ? performance.now() : 0;
   const analysis = performanceStats.measure("analysis.parse", () => analyzePawn(text));
   performanceStats.count("analysis.filesParsed");
   performanceStats.count("analysis.tokens", analysis.tokens.length);
   performanceStats.count("analysis.symbols", analysis.symbols.length);
+
+  if (performanceStats.isEnabled) {
+    let sourcePath = uri;
+    try {
+      if (uri.startsWith("file:")) sourcePath = fileURLToPath(uri);
+    } catch {
+      // Keep the URI as a useful fallback for virtual documents.
+    }
+    performanceStats.recordFileAnalysis(
+      sourcePath,
+      Buffer.byteLength(text, "utf8"),
+      analysis.tokens.length,
+      analysis.symbols.length,
+      performance.now() - startedAt
+    );
+  }
   return analysis;
 };
 
@@ -381,7 +398,7 @@ const collectSymbols = (textDocument: TextDocument) => {
       text,
       analysis: cachedAnalysis?.text === text
         ? cachedAnalysis.analysis
-        : analyzePawnMeasured(text),
+        : analyzePawnMeasured(textDocument.uri, text),
     });
     indexedSymbolTexts.set(textDocument.uri, text);
   });
@@ -632,16 +649,47 @@ connection.onDocumentSymbol((params) => {
 });
 
 const buildCompletionItems = (uri: string, offset: number): CompletionItem[] => {
-  const visibleUris = getIncludedFileUris(uri, includeGraph);
-  const sources: PawnCompletionSource[] = [];
+  const visibleUris = performanceStats.measure(
+    "completion.includeClosure",
+    () => getIncludedFileUris(uri, includeGraph)
+  );
+  performanceStats.count("completion.includeFiles", visibleUris.size);
 
-  visibleUris.forEach((visibleUri) => {
-    ensureSymbolsIndexed(visibleUri);
-    const analysis = getAnalysis(visibleUri);
-    if (analysis) sources.push({ uri: visibleUri, analysis });
+  const sources: PawnCompletionSource[] = [];
+  performanceStats.measure("completion.sourcePreparation", () => {
+    visibleUris.forEach((visibleUri) => {
+      performanceStats.count("completion.filesVisited");
+      const text = getDocumentText(visibleUri);
+      const needsSymbolIndex = text !== undefined &&
+        indexedSymbolTexts.get(visibleUri) !== text;
+      if (needsSymbolIndex) performanceStats.count("completion.filesIndexedOnDemand");
+
+      const cached = analysisCache.get(visibleUri);
+      if (!cached || cached.text !== text) {
+        performanceStats.count("completion.filesParsedOnDemand");
+      }
+
+      performanceStats.measure("completion.ensureSymbolsIndexed", () =>
+        ensureSymbolsIndexed(visibleUri)
+      );
+      const analysis = performanceStats.measure(
+        "completion.getAnalysis",
+        () => getAnalysis(visibleUri)
+      );
+      if (analysis) {
+        sources.push({ uri: visibleUri, analysis });
+        performanceStats.count("completion.sourceSymbols", analysis.symbols.length);
+      }
+    });
   });
 
-  return buildPawnCompletionItems(uri, offset, sources);
+  const items = performanceStats.measure(
+    "completion.buildItems",
+    () => buildPawnCompletionItems(uri, offset, sources)
+  );
+  performanceStats.count("completion.sources", sources.length);
+  performanceStats.count("completion.candidateItems", items.length);
+  return items;
 };
 
 connection.onCompletion((params: CompletionParams): CompletionList =>
@@ -651,16 +699,19 @@ connection.onCompletion((params: CompletionParams): CompletionList =>
 
     const offset = document.offsetAt(params.position);
     const items = buildCompletionItems(params.textDocument.uri, offset);
-    const prefixMatch = /[A-Za-z_@][A-Za-z0-9_@]*$/.exec(
-      document.getText().slice(0, offset)
-    );
-    const prefix = prefixMatch ? prefixMatch[0].toLowerCase() : "";
+    const filteredItems = performanceStats.measure("completion.filterItems", () => {
+      const prefixMatch = /[A-Za-z_@][A-Za-z0-9_@]*$/.exec(
+        document.getText().slice(0, offset)
+      );
+      const prefix = prefixMatch ? prefixMatch[0].toLowerCase() : "";
 
-    const filteredItems = prefix
-      ? items.filter((item) =>
-          String(item.filterText || item.label).toLowerCase().startsWith(prefix)
-        )
-      : items;
+      return prefix
+        ? items.filter((item) =>
+            String(item.filterText || item.label).toLowerCase().startsWith(prefix)
+          )
+        : items;
+    });
+    performanceStats.count("completion.returnedItems", filteredItems.length);
 
     return { isIncomplete: false, items: filteredItems };
   })
@@ -690,7 +741,7 @@ const getAnalysis = (uri: string): PawnAnalysis | undefined => {
   }
 
   performanceStats.count("analysis.cacheMisses");
-  const analysis = analyzePawnMeasured(text);
+  const analysis = analyzePawnMeasured(uri, text);
   analysisCache.set(uri, { text, analysis });
   return analysis;
 };
@@ -705,14 +756,28 @@ const getWorkspaceAnalyses = (sourceUri?: string): WorkspacePawnAnalysis[] => {
   documents.all().forEach((document) => uris.add(document.uri));
 
   const visibleUris = sourceUri
-    ? getCompilationUnitUris(sourceUri, includeGraph)
+    ? performanceStats.measure(
+        "workspace.compilationUnitLookup",
+        () => getCompilationUnitUris(sourceUri, includeGraph)
+      )
     : uris;
+  performanceStats.count("workspace.analysisFiles", visibleUris.size);
 
   const result: WorkspacePawnAnalysis[] = [];
-  visibleUris.forEach((uri) => {
-    if (!uris.has(uri) && uri !== sourceUri) return;
-    const analysis = getAnalysis(uri);
-    if (analysis) result.push({ uri, analysis });
+  performanceStats.measure("workspace.analysisPreparation", () => {
+    visibleUris.forEach((uri) => {
+      if (!uris.has(uri) && uri !== sourceUri) return;
+      performanceStats.count("workspace.analysisFilesVisited");
+      const before = analysisCache.get(uri);
+      const text = getDocumentText(uri);
+      const needsParse = text !== undefined && (!before || before.text !== text);
+      if (needsParse) performanceStats.count("workspace.analysisFilesParsedOnDemand");
+      const analysis = performanceStats.measure(
+        "workspace.getAnalysis",
+        () => getAnalysis(uri)
+      );
+      if (analysis) result.push({ uri, analysis });
+    });
   });
   return result;
 };
@@ -829,38 +894,70 @@ connection.languages.semanticTokens.on((params) =>
   // Semantic coloring only needs declarations from this file and the
   // files it actually includes. Walking the full compilation unit also pulls
   // in every sibling module and can expand to thousands of YSI files.
-  const workspace: WorkspacePawnAnalysis[] = [];
-  getIncludedFileUris(document.uri, includeGraph).forEach((uri) => {
-    const includedAnalysis = getAnalysis(uri);
-    if (includedAnalysis) workspace.push({ uri, analysis: includedAnalysis });
-  });
+  const includedUris = performanceStats.measure(
+    "semanticTokens.includeClosure",
+    () => getIncludedFileUris(document.uri, includeGraph)
+  );
+  performanceStats.count("semanticTokens.includeFiles", includedUris.size);
 
-  const projectKinds = new Map<string, PawnSymbol["kind"]>();
-  workspace.forEach((entry) => {
-    entry.analysis.symbols.forEach((symbol) => {
-      if (!projectKinds.has(symbol.name) ||
-          symbol.kind === "function" ||
-          symbol.kind === "macro" ||
-          symbol.kind === "enum" ||
-          symbol.kind === "enumMember" ||
-          symbol.kind === "type") {
-        projectKinds.set(symbol.name, symbol.kind);
+  const workspace: WorkspacePawnAnalysis[] = [];
+  performanceStats.measure("semanticTokens.analysisPreparation", () => {
+    includedUris.forEach((uri) => {
+      performanceStats.count("semanticTokens.filesVisited");
+      const before = analysisCache.get(uri);
+      const text = getDocumentText(uri);
+      if (text !== undefined && (!before || before.text !== text)) {
+        performanceStats.count("semanticTokens.filesParsedOnDemand");
       }
+      const includedAnalysis = performanceStats.measure(
+        "semanticTokens.getAnalysis",
+        () => getAnalysis(uri)
+      );
+      if (includedAnalysis) workspace.push({ uri, analysis: includedAnalysis });
     });
   });
+  performanceStats.count("semanticTokens.sourceSymbols", workspace.reduce(
+    (total, entry) => total + entry.analysis.symbols.length,
+    0
+  ));
 
-  const localSymbolsByName = new Map<string, PawnSymbol[]>();
-  analysis.symbols.forEach((symbol) => {
-    if (symbol.kind !== "local" && symbol.kind !== "parameter") return;
+  const projectKinds = performanceStats.measure(
+    "semanticTokens.projectSymbolIndex",
+    () => {
+      const index = new Map<string, PawnSymbol["kind"]>();
+      workspace.forEach((entry) => {
+        entry.analysis.symbols.forEach((symbol) => {
+          if (!index.has(symbol.name) ||
+              symbol.kind === "function" ||
+              symbol.kind === "macro" ||
+              symbol.kind === "enum" ||
+              symbol.kind === "enumMember" ||
+              symbol.kind === "type") {
+            index.set(symbol.name, symbol.kind);
+          }
+        });
+      });
+      return index;
+    }
+  );
 
-    const matches = localSymbolsByName.get(symbol.name) || [];
-    matches.push(symbol);
-    localSymbolsByName.set(symbol.name, matches);
-  });
-  // Keep the most recently declared candidate first so resolving a local
-  // identifier does not filter and sort the complete symbol list each time.
-  localSymbolsByName.forEach((matches) =>
-    matches.sort((left, right) => right.start - left.start)
+  const localSymbolsByName = performanceStats.measure(
+    "semanticTokens.localSymbolIndex",
+    () => {
+      const index = new Map<string, PawnSymbol[]>();
+      analysis.symbols.forEach((symbol) => {
+        if (symbol.kind !== "local" && symbol.kind !== "parameter") return;
+        const matches = index.get(symbol.name) || [];
+        matches.push(symbol);
+        index.set(symbol.name, matches);
+      });
+      // Keep the most recently declared candidate first so resolving a local
+      // identifier does not filter and sort the complete symbol list each time.
+      index.forEach((matches) =>
+        matches.sort((left, right) => right.start - left.start)
+      );
+      return index;
+    }
   );
 
   const typeAnnotationStarts = new Set<number>();
@@ -884,6 +981,7 @@ connection.languages.semanticTokens.on((params) =>
   const tokenTypeIndex = new Map(tokenTypes.map((type, index) => [type, index]));
   const builder = new SemanticTokensBuilder();
 
+  performanceStats.measure("semanticTokens.classifyTokens", () =>
   analysis.tokens.forEach((token, tokenIndex) => {
     let tokenType: string | undefined;
     let isDeclaration = false;
@@ -945,9 +1043,13 @@ connection.languages.semanticTokens.on((params) =>
       typeIndex,
       isDeclaration ? 1 : 0
     );
-  });
+  })
+  );
 
-  return builder.build();
+  const result = builder.build();
+  performanceStats.count("semanticTokens.inputTokens", analysis.tokens.length);
+  performanceStats.count("semanticTokens.outputEntries", Math.floor(result.data.length / 5));
+  return result;
   })
 );
 
@@ -965,9 +1067,16 @@ const getFunctionInCompilationUnit = (
   uri: string,
   identifier: string
 ) => {
-  const visibleUris = getIncludedFileUris(uri, includeGraph);
+  const visibleUris = performanceStats.measure(
+    "hover.functionIncludeClosure",
+    () => getIncludedFileUris(uri, includeGraph)
+  );
+  performanceStats.count("hover.functionFilesVisited", visibleUris.size);
   for (const visibleUri of visibleUris) {
-    ensureSymbolsIndexed(visibleUri);
+    performanceStats.measure(
+      "hover.functionEnsureSymbols",
+      () => ensureSymbolsIndexed(visibleUri)
+    );
     const functions = functionTokensByUri.get(visibleUri);
     if (!functions) continue;
     const found = Array.from(functions.entries()).find(
@@ -1000,14 +1109,20 @@ const doHover = (
   const content = document.getText();
   const cursorIndex = positionToIndex(content, position);
   const result = findIdentifierAtCursor(content, cursorIndex);
-  const currentAnalysis = getAnalysis(document.uri);
+  const currentAnalysis = performanceStats.measure(
+    "hover.currentAnalysis",
+    () => getAnalysis(document.uri)
+  );
 
   if (currentAnalysis && result.identifier) {
-    const currentSymbol = resolvePawnSymbol(
-      currentAnalysis,
-      document.uri,
-      cursorIndex,
-      [currentAnalysis]
+    const currentSymbol = performanceStats.measure(
+      "hover.localSymbolResolve",
+      () => resolvePawnSymbol(
+        currentAnalysis,
+        document.uri,
+        cursorIndex,
+        [currentAnalysis]
+      )
     );
     if (currentSymbol) {
       return { contents: [formatPawnSymbolHover(currentSymbol)] };
@@ -1015,19 +1130,28 @@ const doHover = (
 
     // Only load wider include/parent scopes when the symbol is not declared
     // in the active file. Ordinary local-variable Hover stays lightweight.
-    const workspace = getWorkspaceAnalyses(document.uri);
-    const includedSymbol = resolvePawnSymbol(
-      currentAnalysis,
-      document.uri,
-      cursorIndex,
-      workspace.map((entry) => entry.analysis)
+    const workspace = performanceStats.measure(
+      "hover.workspaceLookup",
+      () => getWorkspaceAnalyses(document.uri)
+    );
+    const includedSymbol = performanceStats.measure(
+      "hover.includedSymbolResolve",
+      () => resolvePawnSymbol(
+        currentAnalysis,
+        document.uri,
+        cursorIndex,
+        workspace.map((entry) => entry.analysis)
+      )
     );
     if (includedSymbol) {
       return { contents: [formatPawnSymbolHover(includedSymbol)] };
     }
   }
 
-  const snip = getFunctionInCompilationUnit(document.uri, result.identifier);
+  const snip = performanceStats.measure(
+    "hover.functionLookup",
+    () => getFunctionInCompilationUnit(document.uri, result.identifier)
+  );
   if (snip) {
     const contents: MarkedString[] = [];
     if (snip.completion.label !== undefined) contents.push(snip.completion.label);
@@ -1037,9 +1161,9 @@ const doHover = (
     return { contents };
   }
 
-  const definition = getDefinitionInCompilationUnit(
-    document.uri,
-    result.identifier
+  const definition = performanceStats.measure(
+    "hover.definitionLookup",
+    () => getDefinitionInCompilationUnit(document.uri, result.identifier)
   );
   if (definition) return { contents: [definition.completion.label] };
 
