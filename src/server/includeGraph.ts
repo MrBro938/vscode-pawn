@@ -65,22 +65,31 @@ export const resolveIncludeUris = (
   sourceUri: string,
   includePath: string,
   indexedPawnFiles: ReadonlyMap<string, string>,
-  includePathIndex: ReadonlyMap<string, ReadonlySet<string>>
+  includePathIndex: ReadonlyMap<string, ReadonlySet<string>>,
+  directPathIndex?: ReadonlyMap<string, string>
 ): string[] => {
   if (!sourceUri.startsWith("file:")) return [];
 
   try {
     const sourceFile = fileURLToPath(sourceUri);
     const variants = includeVariants(includePath);
-    const indexedPaths = Array.from(indexedPawnFiles.entries());
+    const indexedPaths = directPathIndex
+      ? undefined
+      : Array.from(indexedPawnFiles.entries());
 
-    // Prefer a path relative to the including file when it exists in the index.
+    // Prefer a path relative to the including file. During graph construction,
+    // use the prebuilt normalized path map instead of scanning every file for
+    // every #include directive.
     for (const variant of variants) {
       const directPath = path.isAbsolute(variant)
         ? path.normalize(variant)
         : path.resolve(path.dirname(sourceFile), variant);
-      const directMatch = indexedPaths.find(
-        ([, filePath]) => normalizePath(filePath) === normalizePath(directPath)
+      const normalizedDirectPath = normalizePath(directPath);
+      const directUri = directPathIndex?.get(normalizedDirectPath);
+      if (directUri) return [directUri];
+
+      const directMatch = indexedPaths?.find(
+        ([, filePath]) => normalizePath(filePath) === normalizedDirectPath
       );
       if (directMatch) return [directMatch[0]];
     }
@@ -113,12 +122,47 @@ export const resolveIncludeUris = (
 
 export type PawnIncludeGraph = Map<string, Set<string>>;
 
+const compilationUnitCache = new WeakMap<PawnIncludeGraph, Map<string, Set<string>>>();
+const includedUrisCache = new WeakMap<PawnIncludeGraph, Map<string, Set<string>>>();
+
+export const getIncludedFileUris = (
+  sourceUri: string,
+  graph: PawnIncludeGraph
+): Set<string> => {
+  let graphCache = includedUrisCache.get(graph);
+  if (!graphCache) {
+    graphCache = new Map<string, Set<string>>();
+    includedUrisCache.set(graph, graphCache);
+  }
+
+  const cached = graphCache.get(sourceUri);
+  if (cached) return cached;
+
+  const included = new Set<string>();
+  const pending = [sourceUri];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (included.has(current)) continue;
+    included.add(current);
+    graph.get(current)?.forEach((target) => {
+      if (!included.has(target)) pending.push(target);
+    });
+  }
+
+  graphCache.set(sourceUri, included);
+  return included;
+};
+
 export const buildPawnIncludeGraph = (
   indexedPawnFiles: ReadonlyMap<string, string>,
   indexedPawnTexts: ReadonlyMap<string, string>,
   includePathIndex: ReadonlyMap<string, ReadonlySet<string>>
 ): PawnIncludeGraph => {
   const graph: PawnIncludeGraph = new Map();
+  const directPathIndex = new Map<string, string>();
+  indexedPawnFiles.forEach((filePath, uri) => {
+    directPathIndex.set(normalizePath(filePath), uri);
+  });
 
   indexedPawnTexts.forEach((text, uri) => {
     const targets = new Set<string>();
@@ -128,7 +172,8 @@ export const buildPawnIncludeGraph = (
         uri,
         includePath,
         indexedPawnFiles,
-        includePathIndex
+        includePathIndex,
+        directPathIndex
       ).forEach((targetUri) => targets.add(targetUri));
     });
 
@@ -153,6 +198,15 @@ export const getCompilationUnitUris = (
   sourceUri: string,
   graph: PawnIncludeGraph
 ): Set<string> => {
+  let graphCache = compilationUnitCache.get(graph);
+  if (!graphCache) {
+    graphCache = new Map<string, Set<string>>();
+    compilationUnitCache.set(graph, graphCache);
+  }
+
+  const cached = graphCache.get(sourceUri);
+  if (cached) return cached;
+
   const reverse = new Map<string, Set<string>>();
 
   graph.forEach((targets, source) => {
@@ -198,5 +252,6 @@ export const getCompilationUnitUris = (
 
   // A graph entry may have not been built yet during initial workspace indexing.
   compilationUnit.add(sourceUri);
+  graphCache.set(sourceUri, compilationUnit);
   return compilationUnit;
 };
