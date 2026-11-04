@@ -254,6 +254,46 @@ export const buildPawnIncludeGraph = (
 };
 
 /**
+ * Replaces the include edges for one already indexed source file. A content
+ * edit that changes only code (not #include directives) does not need to touch
+ * the graph at all; this helper handles the less common include-directive edit
+ * without reparsing every other file in a large workspace.
+ */
+export const updatePawnIncludeGraph = (
+  graph: PawnIncludeGraph,
+  sourceUri: string,
+  indexedPawnFiles: ReadonlyMap<string, string>,
+  indexedPawnTexts: ReadonlyMap<string, string>,
+  includePathIndex: ReadonlyMap<string, ReadonlySet<string>>,
+  includeDirectories: readonly string[] = [],
+  directPathIndex?: ReadonlyMap<string, string>
+): PawnIncludeGraph => {
+  const updated = new Map(graph);
+  const text = indexedPawnTexts.get(sourceUri);
+  if (text === undefined || !indexedPawnFiles.has(sourceUri)) {
+    updated.delete(sourceUri);
+    return updated;
+  }
+
+  const pathIndex = directPathIndex || buildPawnPathIndex(indexedPawnFiles);
+  const targets = new Set<string>();
+  extractPawnIncludes(text).forEach((directive) => {
+    resolveIncludeUris(
+      sourceUri,
+      directive.path,
+      directive.mode,
+      indexedPawnFiles,
+      includePathIndex,
+      includeDirectories,
+      pathIndex
+    ).forEach((targetUri) => targets.add(targetUri));
+  });
+
+  updated.set(sourceUri, targets);
+  return updated;
+};
+
+/**
  * Returns all files connected to a source through include parents and children.
  * This is used for cross-file symbol lookup, not for compiler include resolution.
  */
