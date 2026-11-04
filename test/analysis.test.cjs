@@ -123,7 +123,7 @@ const macroSource = [
   "/*",
   "#define HIDDEN_MACRO(%1) should_not_be_indexed",
   "*/"
-].join("\\n");
+].join("\n");
 const macroAnalysis = analyzePawn(macroSource);
 const findMacro = (name) =>
   macroAnalysis.symbols.find((symbol) => symbol.kind === "macro" && symbol.name === name);
