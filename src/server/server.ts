@@ -673,18 +673,11 @@ const buildCompletionItems = (uri: string, offset: number): CompletionItem[] => 
     visibleUris.forEach((visibleUri) => {
       performanceStats.count("completion.filesVisited");
       const text = getDocumentText(visibleUri);
-      const needsSymbolIndex = text !== undefined &&
-        indexedSymbolTexts.get(visibleUri) !== text;
-      if (needsSymbolIndex) performanceStats.count("completion.filesIndexedOnDemand");
-
       const cached = analysisCache.get(visibleUri);
       if (!cached || cached.text !== text) {
         performanceStats.count("completion.filesParsedOnDemand");
       }
 
-      performanceStats.measure("completion.ensureSymbolsIndexed", () =>
-        ensureSymbolsIndexed(visibleUri)
-      );
       const analysis = performanceStats.measure(
         "completion.getAnalysis",
         () => getAnalysis(visibleUri)
