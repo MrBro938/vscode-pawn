@@ -74,8 +74,8 @@ export class PerformanceMonitor {
     }
   }
 
-  async measureAsync<T>(name: string, operation: () => Promise<T>): Promise<T> {
-    if (!this.enabled) return operation();
+  async measureAsync<T>(name: string, operation: () => PromiseLike<T>): Promise<T> {
+    if (!this.enabled) return await operation();
     const startedAt = performance.now();
     try {
       return await operation();
