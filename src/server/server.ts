@@ -60,6 +60,7 @@ const PARSE_DEBOUNCE_MS = 150;
 const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
 const completionCache = new Map<string, CompletionItem[]>();
 const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>();
+let semanticTokensRefreshSupported = false;
 
 // Workspace include index. Each path suffix points to all matching files,
 // allowing includes to resolve independently of the including file's directory.
@@ -233,7 +234,11 @@ const reloadConfiguredIncludes = () => {
 
 documents.listen(connection);
 
-connection.onInitialize(() => ({
+connection.onInitialize((params) => {
+  semanticTokensRefreshSupported =
+    params.capabilities.workspace?.semanticTokens?.refreshSupport === true;
+
+  return {
   capabilities: {
     textDocumentSync: TextDocumentSyncKind.Full,
     completionProvider: { resolveProvider: true },
@@ -254,7 +259,8 @@ connection.onInitialize(() => ({
       full: true,
     },
   },
-}));
+  };
+});
 
 const removeDocumentSymbols = (uri: string) => {
   functionTokens.forEach((value, key) => {
@@ -277,7 +283,10 @@ const collectSymbols = (textDocument: TextDocument, includeWords = true) => {
   completionCache.clear();
 };
 
-const scheduleCollectSymbols = (textDocument: TextDocument) => {
+const scheduleCollectSymbols = (
+  textDocument: TextDocument,
+  refreshSemanticTokens = false
+) => {
   const uri = textDocument.uri;
   const pending = pendingParses.get(uri);
   if (pending) clearTimeout(pending);
@@ -285,6 +294,12 @@ const scheduleCollectSymbols = (textDocument: TextDocument) => {
   const timer = setTimeout(() => {
     pendingParses.delete(uri);
     collectSymbols(textDocument);
+
+    // A reopened document can retain stale semantic-token state in the editor.
+    // Ask the client for a fresh full token response after its analysis is ready.
+    if (refreshSemanticTokens && semanticTokensRefreshSupported) {
+      void connection.languages.semanticTokens.refresh();
+    }
   }, PARSE_DEBOUNCE_MS);
 
   pendingParses.set(uri, timer);
@@ -294,7 +309,7 @@ documents.onDidOpen((change) => {
   if (change.document.uri.startsWith("file:")) {
     indexPawnFile(change.document.uri, change.document.getText());
   }
-  scheduleCollectSymbols(change.document);
+  scheduleCollectSymbols(change.document, true);
 });
 documents.onDidChangeContent((change) => {
   if (change.document.uri.startsWith("file:")) {
