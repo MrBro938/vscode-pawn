@@ -56,14 +56,14 @@ import {
 } from "./analysis";
 import {
   buildPawnIncludeGraph,
-  getCompilationUnitUris,
   PawnIncludeGraph,
   resolveIncludeUris,
-  getIncludedFileUris,
   extractPawnIncludes,
   updatePawnIncludeGraph,
   normalizePawnPath,
   PawnIncludeMode,
+  PawnFunctionSearchScope,
+  getPawnSearchUris,
 } from "./includeGraph";
 import { resolveIncludeConfiguration } from "./includeConfig";
 import { PerformanceMonitor } from "../performance";
@@ -101,6 +101,7 @@ let configuredWorkspaceRoots: string[] = [];
 let configuredIncludePaths: string[] = [];
 let configuredIncludeDirectories: string[] = [];
 let configuredCompilerPath = "";
+let configuredFunctionSearchScope: PawnFunctionSearchScope = "includes";
 
 const rebuildIncludeGraph = () => performanceStats.measure(
   "include.graphRebuild",
@@ -550,6 +551,7 @@ connection.onNotification(
     workspaceRoots?: string[];
     includePaths?: string[];
     compilerPath?: string;
+    functionSearchScope?: string;
   }) => {
     configuredWorkspaceRoots = (params.workspaceRoots || [])
       .filter((value) => typeof value === "string")
@@ -558,6 +560,16 @@ connection.onNotification(
       .filter((value) => typeof value === "string");
     configuredCompilerPath =
       typeof params.compilerPath === "string" ? params.compilerPath : "";
+    const supportedSearchScopes: PawnFunctionSearchScope[] = [
+      "includes",
+      "compilationUnit",
+      "workspace",
+    ];
+    configuredFunctionSearchScope = supportedSearchScopes.includes(
+      params.functionSearchScope as PawnFunctionSearchScope
+    )
+      ? params.functionSearchScope as PawnFunctionSearchScope
+      : "includes";
 
     reloadConfiguredIncludes();
   }
@@ -751,15 +763,26 @@ interface WorkspacePawnAnalysis {
   analysis: PawnAnalysis;
 }
 
+const getFunctionSearchUris = (sourceUri: string): Set<string> => {
+  const workspaceUris = new Set<string>(indexedPawnFiles.keys());
+  documents.all().forEach((document) => workspaceUris.add(document.uri));
+  return performanceStats.measure(
+    "functionSearch.scopeLookup",
+    () => getPawnSearchUris(
+      sourceUri,
+      includeGraph,
+      configuredFunctionSearchScope,
+      workspaceUris
+    )
+  );
+};
+
 const getWorkspaceAnalyses = (sourceUri?: string): WorkspacePawnAnalysis[] => {
   const uris = new Set<string>(indexedPawnFiles.keys());
   documents.all().forEach((document) => uris.add(document.uri));
 
   const visibleUris = sourceUri
-    ? performanceStats.measure(
-        "workspace.compilationUnitLookup",
-        () => getCompilationUnitUris(sourceUri, includeGraph)
-      )
+    ? getFunctionSearchUris(sourceUri)
     : uris;
   performanceStats.count("workspace.analysisFiles", visibleUris.size);
 
@@ -1063,14 +1086,11 @@ connection.onHover((params: TextDocumentPositionParams): Hover | undefined =>
   })
 );
 
-const getFunctionInCompilationUnit = (
+const getFunctionInSearchScope = (
   uri: string,
   identifier: string
 ) => {
-  const visibleUris = performanceStats.measure(
-    "hover.functionIncludeClosure",
-    () => getIncludedFileUris(uri, includeGraph)
-  );
+  const visibleUris = getFunctionSearchUris(uri);
   performanceStats.count("hover.functionFilesVisited", visibleUris.size);
   for (const visibleUri of visibleUris) {
     performanceStats.measure(
@@ -1087,11 +1107,11 @@ const getFunctionInCompilationUnit = (
   return undefined;
 };
 
-const getDefinitionInCompilationUnit = (
+const getDefinitionInSearchScope = (
   uri: string,
   identifier: string
 ) => {
-  const visibleUris = getCompilationUnitUris(uri, includeGraph);
+  const visibleUris = getFunctionSearchUris(uri);
   for (const visibleUri of visibleUris) {
     ensureSymbolsIndexed(visibleUri);
     const found = definitionTokens.get(visibleUri)?.find(
@@ -1150,7 +1170,7 @@ const doHover = (
 
   const snip = performanceStats.measure(
     "hover.functionLookup",
-    () => getFunctionInCompilationUnit(document.uri, result.identifier)
+    () => getFunctionInSearchScope(document.uri, result.identifier)
   );
   if (snip) {
     const contents: MarkedString[] = [];
@@ -1163,7 +1183,7 @@ const doHover = (
 
   const definition = performanceStats.measure(
     "hover.definitionLookup",
-    () => getDefinitionInCompilationUnit(document.uri, result.identifier)
+    () => getDefinitionInSearchScope(document.uri, result.identifier)
   );
   if (definition) return { contents: [definition.completion.label] };
 
@@ -1180,14 +1200,11 @@ connection.onSignatureHelp((params: SignatureHelpParams):
   })
 );
 
-const findFunctionSymbolInIncludeClosure = (
+const findFunctionSymbolInSearchScope = (
   uri: string,
   identifier: string
 ): { analysis: PawnAnalysis; symbol: PawnSymbol } | undefined => {
-  const visibleUris = new Set<string>([
-    ...getIncludedFileUris(uri, includeGraph),
-    ...getCompilationUnitUris(uri, includeGraph),
-  ]);
+  const visibleUris = getFunctionSearchUris(uri);
 
   for (const visibleUri of visibleUris) {
     ensureSymbolsIndexed(visibleUri);
@@ -1267,7 +1284,7 @@ const doSignHelp = (
   const result = findFunctionIdentifier(content, cursorIndex);
   if (result.identifier === "") return undefined;
 
-  const resolved = findFunctionSymbolInIncludeClosure(
+  const resolved = findFunctionSymbolInSearchScope(
     document.uri,
     result.identifier
   );

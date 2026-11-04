@@ -353,3 +353,30 @@ export const getCompilationUnitUris = (
   graphCache.set(sourceUri, compilationUnit);
   return compilationUnit;
 };
+
+
+export type PawnFunctionSearchScope = "includes" | "compilationUnit" | "workspace";
+
+/**
+ * Resolves the files eligible for cross-file function/symbol lookup.
+ * Workspace scope deliberately uses the already-indexed file list supplied by
+ * the caller; include and compilation-unit scopes stay bounded by the graph.
+ */
+export const getPawnSearchUris = (
+  sourceUri: string,
+  graph: PawnIncludeGraph,
+  scope: PawnFunctionSearchScope = "includes",
+  workspaceUris?: Iterable<string>
+): Set<string> => {
+  if (scope === "workspace") {
+    const result = new Set(workspaceUris || graph.keys());
+    result.add(sourceUri);
+    return result;
+  }
+
+  if (scope === "compilationUnit") {
+    return getCompilationUnitUris(sourceUri, graph);
+  }
+
+  return getIncludedFileUris(sourceUri, graph);
+};

@@ -151,6 +151,21 @@
                     "type": "boolean",
                     "default": false,
                     "description": "Collect local performance statistics for workspace indexing, Pawn analysis, semantic tokens and IntelliSense requests."
+                },
+                "pawn.functionSearchScope": {
+                    "type": "string",
+                    "enum": [
+                        "includes",
+                        "compilationUnit",
+                        "workspace"
+                    ],
+                    "enumDescriptions": [
+                        "Fastest: search the current file and files it includes recursively. Standard functions such as SetPlayerPos are found through a_samp.inc when it is included.",
+                        "Search the current file, its includes, and files that include it.",
+                        "Search every indexed Pawn file in the workspace and configured include directories. This can be slower in large projects."
+                    ],
+                    "default": "includes",
+                    "description": "Controls which files are searched for cross-file functions, native declarations and symbols in Hover and Signature Help."
                 }
             }
         }

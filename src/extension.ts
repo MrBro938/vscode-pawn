@@ -232,6 +232,7 @@ const sendIncludeConfiguration = async () => {
       ),
       includePaths: configuration.get<string[]>("includePaths", []),
       compilerPath: configuration.get<string>("compilerPath", ""),
+      functionSearchScope: configuration.get<string>("functionSearchScope", "includes"),
     })
   );
 };
@@ -379,7 +380,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
       if (
         event.affectsConfiguration("pawn.includePaths") ||
-        event.affectsConfiguration("pawn.compilerPath")
+        event.affectsConfiguration("pawn.compilerPath") ||
+        event.affectsConfiguration("pawn.functionSearchScope")
       ) {
         void sendIncludeConfiguration();
       }

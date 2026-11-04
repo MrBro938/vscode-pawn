@@ -6,6 +6,7 @@ const {
   extractPawnIncludes,
   getCompilationUnitUris,
   getIncludedFileUris,
+  getPawnSearchUris,
   resolveIncludeUris,
   updatePawnIncludeGraph
 } = require("../out/server/includeGraph.js");
@@ -256,3 +257,26 @@ assert.ok(
 );
 
 console.log("Pawn include graph tests passed.");
+
+
+const includeSearch = getPawnSearchUris(rootA, graph, "includes", files.keys());
+assert.deepEqual(
+  Array.from(includeSearch).sort(),
+  [rootA, apiA, sideA, common].sort(),
+  "includes scope should search only the source file and recursive include dependencies"
+);
+
+const compilationSearch = getPawnSearchUris(rootA, graph, "compilationUnit", files.keys());
+assert.deepEqual(
+  Array.from(compilationSearch).sort(),
+  Array.from(unitA).sort(),
+  "compilationUnit scope should include the related roots and their dependencies"
+);
+assert.ok(!compilationSearch.has(rootB),
+  "compilationUnit scope must not cross into an independent compilation unit");
+
+const workspaceSearch = getPawnSearchUris(rootA, graph, "workspace", files.keys());
+assert.equal(workspaceSearch.size, files.size,
+  "workspace scope should include every indexed Pawn file");
+assert.ok(workspaceSearch.has(rootB),
+  "workspace scope should include unrelated source files when explicitly selected");
