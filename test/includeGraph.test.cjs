@@ -70,13 +70,15 @@ const includes = extractPawnIncludes([
   '#include "inside_multiline_comment.inc"',
   "*/",
   '#include "real.inc" // trailing comment',
-  '#include <standard.inc>'
+  '#include <standard.inc>',
+  "#include bare_local.inc"
 ].join("\n"));
 assert.deepEqual(
   includes,
   [
     { path: "real.inc", mode: "quoted" },
-    { path: "standard.inc", mode: "system" }
+    { path: "standard.inc", mode: "system" },
+    { path: "bare_local.inc", mode: "quoted" }
   ],
   "only active include directives should be parsed and include delimiters must be preserved"
 );
@@ -166,6 +168,18 @@ assert.deepEqual(
   ),
   [],
   "angle includes must not resolve from the including file's directory"
+);
+assert.deepEqual(
+  resolveIncludeUris(
+    rootA,
+    "missing",
+    "system",
+    files,
+    pathIndex,
+    ["/workspace/dependencies/YSI-Includes"]
+  ),
+  [],
+  "configured compiler paths must not fall back to unrelated same-suffix files"
 );
 
 const isolated = getCompilationUnitUris("file:///workspace/other/isolated.pwn", graph);
