@@ -111,4 +111,64 @@ assert.equal(
   "function calls must not be misidentified as declarations"
 );
 
+const macroSource = [
+  "/**",
+  " * Returns the smaller value.",
+  " */",
+  "#define min(%1,%2) ((%1) < (%2) ? (%1) : (%2))",
+  "#define IsValid(%1) \\",
+  "    (IsPlayerConnected(%1) && %1 != INVALID_PLAYER_ID)",
+  "#define Object[%1] CallObject(%1)",
+  "#define MAX_PATH 260",
+  "/*",
+  "#define HIDDEN_MACRO(%1) should_not_be_indexed",
+  "*/"
+].join("\\n");
+const macroAnalysis = analyzePawn(macroSource);
+const findMacro = (name) =>
+  macroAnalysis.symbols.find((symbol) => symbol.kind === "macro" && symbol.name === name);
+
+const minMacro = findMacro("min");
+assert.ok(minMacro, "parameterized function-style macros should be indexed");
+assert.deepEqual(
+  minMacro.macroParameters,
+  ["%1", "%2"],
+  "Pawn macro placeholders should be extracted in pattern order"
+);
+assert.equal(
+  minMacro.macroPattern,
+  "(%1,%2)",
+  "macro matching pattern should be retained without replacement text"
+);
+assert.equal(
+  minMacro.documentation,
+  "Returns the smaller value.",
+  "documentation comments immediately above macros should be retained"
+);
+
+const multilineMacro = findMacro("IsValid");
+assert.deepEqual(
+  multilineMacro.macroParameters,
+  ["%1"],
+  "continued macro directives should preserve their parameter list"
+);
+assert.ok(
+  multilineMacro.macroReplacement.includes("IsPlayerConnected(%1)"),
+  "continued macro replacement text should be joined"
+);
+
+const patternMacro = findMacro("Object");
+assert.deepEqual(
+  patternMacro.macroParameters,
+  ["%1"],
+  "bracket-pattern Pawn macros should be indexed"
+);
+assert.equal(
+  patternMacro.macroPattern,
+  "[%1]",
+  "non-parenthesized Pawn macro patterns should be preserved"
+);
+assert.ok(findMacro("MAX_PATH"), "simple constant-style defines should remain supported");
+assert.ok(!findMacro("HIDDEN_MACRO"), "defines inside block comments must not be indexed");
+
 console.log("Pawn symbol analysis tests passed.");
