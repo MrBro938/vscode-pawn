@@ -243,7 +243,7 @@ const callSource = [
   "notAFunction;",
   'printf("notAFunction(", playerid);',
   "// HiddenFunction(playerid);"
-].join("\\n");
+].join("\n");
 const callTokens = tokenizePawn(callSource);
 const tokenIndex = (name, startAt = 0) => callTokens.findIndex((token, index) =>
   index >= startAt && token.kind === "identifier" && token.value === name
