@@ -72,6 +72,10 @@ import {
 } from "./includeGraph";
 import { resolveIncludeConfiguration } from "./includeConfig";
 import { PerformanceMonitor } from "../performance";
+import {
+  isSemanticTokensDependencySnapshotCurrent,
+  SemanticTokensDependencySnapshot,
+} from "./semanticTokensCache";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -116,24 +120,49 @@ const markCompletionSourceStale = (uri: string) => {
 const indexedSymbolTexts = new Map<string, string>();
 let semanticTokensRefreshSupported = false;
 
-interface SemanticTokensCacheEntry {
+interface SemanticTokensContext extends SemanticTokensDependencySnapshot<PawnAnalysis> {
   analysis: PawnAnalysis;
-  generation: number;
-  result: ReturnType<SemanticTokensBuilder["build"]>;
-}
-
-interface SemanticTokensContext {
-  analysis: PawnAnalysis;
-  generation: number;
   projectKinds: Map<string, PawnSymbol["kind"]>;
   localSymbolsByName: Map<string, PawnSymbol[]>;
   declarations: Map<number, PawnSymbol>;
 }
 
-// The generation changes whenever a Pawn source, cached analysis or include
-// graph changes. This lets cached range responses validate in O(1) without
-// walking every include on each editor request.
-let semanticTokensGeneration = 0;
+interface SemanticTokensCacheEntry {
+  context: SemanticTokensContext;
+  result: ReturnType<SemanticTokensBuilder["build"]>;
+}
+
+// Include-graph changes invalidate all contexts. Source edits invalidate only
+// contexts that depend on the edited URI.
+let semanticTokensGraphGeneration = 0;
+const semanticTokensFileVersions = new Map<string, number>();
+const bumpSemanticTokensFileVersion = (uri: string) => {
+  semanticTokensFileVersions.set(uri, (semanticTokensFileVersions.get(uri) || 0) + 1);
+};
+const getSemanticTokensFileVersion = (uri: string) =>
+  semanticTokensFileVersions.get(uri) || 0;
+
+const isSemanticTokensContextCurrent = (
+  context: SemanticTokensContext,
+  analysis: PawnAnalysis
+): boolean => performanceStats.measure("semanticTokens.contextValidation", () => {
+  const current = context.analysis === analysis &&
+    isSemanticTokensDependencySnapshotCurrent(
+      context,
+      semanticTokensGraphGeneration,
+      getSemanticTokensFileVersion,
+      (uri) => analysisCache.get(uri)?.analysis
+    );
+  if (current) {
+    performanceStats.count(
+      "semanticTokens.contextValidationFiles",
+      context.sourceVersions.size
+    );
+  } else {
+    performanceStats.count("semanticTokens.contextValidationMisses");
+  }
+  return current;
+});
 
 // Keep a small LRU of range responses plus one symbol-resolution context per
 // recently used document. The context is shared by all visible ranges.
@@ -170,7 +199,7 @@ const setFunctionSearchScope = (scope?: string) => {
 const rebuildIncludeGraph = () => performanceStats.measure(
   "include.graphRebuild",
   () => {
-    semanticTokensGeneration++;
+    semanticTokensGraphGeneration++;
     invalidateCompletionSources();
     includeGraph = buildPawnIncludeGraph(
       indexedPawnFiles,
@@ -202,7 +231,7 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
     );
 
     if (textChanged) {
-      semanticTokensGeneration++;
+      bumpSemanticTokensFileVersion(uri);
       markCompletionSourceStale(uri);
       if (includeGraphChanged) invalidateCompletionSources();
       indexedSymbolTexts.delete(uri);
@@ -254,6 +283,7 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
           configuredIncludeDirectories,
           indexedPawnPathIndex
         );
+        semanticTokensGraphGeneration++;
       }
     }
   } catch {
@@ -265,7 +295,7 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
   const filePath = indexedPawnFiles.get(uri);
   if (!filePath) return;
 
-  semanticTokensGeneration++;
+  bumpSemanticTokensFileVersion(uri);
   invalidateCompletionSources();
   indexedPawnFiles.delete(uri);
   indexedPawnPathIndex.delete(normalizePawnPath(filePath));
@@ -468,10 +498,7 @@ const collectSymbols = (textDocument: TextDocument) => {
     const cachedAnalysis = analysisCache.get(textDocument.uri);
     const analysis = cachedAnalysis?.text === text
       ? cachedAnalysis.analysis
-      : (() => {
-          semanticTokensGeneration++;
-          return analyzePawnMeasured(textDocument.uri, text);
-        })();
+      : analyzePawnMeasured(textDocument.uri, text);
     analysisCache.set(textDocument.uri, { text, analysis });
     indexedSymbolTexts.set(textDocument.uri, text);
   });
@@ -607,6 +634,9 @@ connection.onNotification(
               indexedPawnPathIndex
             );
           });
+          if (changedIncludeSources.size > 0) {
+            semanticTokensGraphGeneration++;
+          }
         }
       }
 
@@ -883,7 +913,6 @@ const getAnalysis = (uri: string): PawnAnalysis | undefined => {
   }
 
   performanceStats.count("analysis.cacheMisses");
-  semanticTokensGeneration++;
   const analysis = analyzePawnMeasured(uri, text);
   analysisCache.set(uri, { text, analysis });
   return analysis;
@@ -1053,8 +1082,7 @@ connection.languages.semanticTokens.onRange((params) =>
   const cachedTokens = semanticTokensCache.get(cacheKey);
   if (
     cachedTokens &&
-    cachedTokens.analysis === analysis &&
-    cachedTokens.generation === semanticTokensGeneration
+    isSemanticTokensContextCurrent(cachedTokens.context, analysis)
   ) {
     performanceStats.count("semanticTokens.cacheHits");
     semanticTokensCache.delete(cacheKey);
@@ -1067,8 +1095,7 @@ connection.languages.semanticTokens.onRange((params) =>
   let context = semanticTokensContextCache.get(document.uri);
   if (
     !context ||
-    context.analysis !== analysis ||
-    context.generation !== semanticTokensGeneration
+    !isSemanticTokensContextCurrent(context, analysis)
   ) {
     performanceStats.count("semanticTokens.contextCacheMisses");
 
@@ -1081,6 +1108,8 @@ connection.languages.semanticTokens.onRange((params) =>
     performanceStats.count("semanticTokens.includeFiles", includedUris.size);
 
     const workspace: WorkspacePawnAnalysis[] = [];
+    const sourceVersions = new Map<string, number>();
+    const sourceAnalyses = new Map<string, PawnAnalysis>();
     performanceStats.measure("semanticTokens.analysisPreparation", () => {
       includedUris.forEach((uri) => {
         performanceStats.count("semanticTokens.filesVisited");
@@ -1093,9 +1122,15 @@ connection.languages.semanticTokens.onRange((params) =>
           "semanticTokens.getAnalysis",
           () => getAnalysis(uri)
         );
-        if (includedAnalysis) workspace.push({ uri, analysis: includedAnalysis });
+        if (includedAnalysis) {
+          workspace.push({ uri, analysis: includedAnalysis });
+          sourceVersions.set(uri, getSemanticTokensFileVersion(uri));
+          sourceAnalyses.set(uri, includedAnalysis);
+        }
       });
     });
+    sourceVersions.set(document.uri, getSemanticTokensFileVersion(document.uri));
+    sourceAnalyses.set(document.uri, analysis);
     performanceStats.count("semanticTokens.sourceSymbols", workspace.reduce(
       (total, entry) => total + entry.analysis.symbols.length,
       0
@@ -1145,7 +1180,9 @@ connection.languages.semanticTokens.onRange((params) =>
 
     context = {
       analysis,
-      generation: semanticTokensGeneration,
+      graphGeneration: semanticTokensGraphGeneration,
+      sourceVersions,
+      sourceAnalyses,
       projectKinds,
       localSymbolsByName,
       declarations,
@@ -1278,8 +1315,7 @@ connection.languages.semanticTokens.onRange((params) =>
 
   semanticTokensCache.delete(cacheKey);
   semanticTokensCache.set(cacheKey, {
-    analysis,
-    generation: semanticTokensGeneration,
+    context,
     result,
   });
   while (semanticTokensCache.size > MAX_SEMANTIC_TOKEN_CACHE_ENTRIES) {
