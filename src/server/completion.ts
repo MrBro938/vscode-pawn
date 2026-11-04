@@ -4,6 +4,7 @@ import {
   InsertTextFormat,
 } from "vscode-languageserver";
 import { PawnAnalysis, PawnSymbol, PawnSymbolKind } from "./analysis";
+import { formatPawnCompletionDetail } from "./symbolDisplay";
 
 export interface PawnCompletionSource {
   uri: string;
@@ -64,7 +65,9 @@ const toCompletionItem = (symbol: PawnSymbol): CompletionItem => {
     kind: isParameterizedMacro
       ? CompletionItemKind.Function
       : completionKind(symbol.kind),
-    detail: symbol.macroReplacement || symbol.detail,
+    detail: symbol.kind === "macro"
+      ? symbol.macroReplacement || symbol.detail
+      : formatPawnCompletionDetail(symbol),
     documentation: symbol.documentation,
     filterText: symbol.name,
     insertText: isParameterizedMacro ? buildMacroSnippet(symbol) : symbol.name,

@@ -25,8 +25,10 @@ export interface PawnSymbol {
   scopeStart: number;
   scopeEnd: number;
   isArray?: boolean;
-  /** Pawn tag annotation. For functions, this is the return tag. */
+  /** Pawn tag annotation. For functions, this is the declared return tag. */
   tag?: string;
+  /** Tag inferred conservatively from an initializer or consistent return expressions. */
+  inferredTag?: string;
   /** Declared parameters, retained for definitions and prototypes alike. */
   parameters?: PawnParameter[];
   detail?: string;
@@ -352,6 +354,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
   const tokens = tokenizePawn(text);
   const symbols: PawnSymbol[] = [];
   const functions: FunctionRegion[] = [];
+  const pendingInitializers: Array<{ symbol: PawnSymbol; expression: string }> = [];
   const bracePairs = new Map<number, number>();
   const braceStack: number[] = [];
   const braceDepths: number[] = [];
@@ -588,7 +591,17 @@ export const analyzePawn = (text: string): PawnAnalysis => {
       const declared = findDeclaredName(tokens, declStart, declEnd);
       if (!declared) return;
 
-      addSymbol(symbols, {
+      let equalsIndex = -1;
+      for (let tokenIndex = declStart; tokenIndex < declEnd; tokenIndex++) {
+        if (isPunctuation(tokens[tokenIndex], "=")) {
+          equalsIndex = tokenIndex;
+          break;
+        }
+      }
+      const initializer = equalsIndex >= 0 && equalsIndex + 1 < declEnd
+        ? text.slice(tokens[equalsIndex + 1].start, tokens[declEnd - 1].end)
+        : "";
+      const variableSymbol: PawnSymbol = {
         name: declared.token.value,
         kind: functionRegion ? "local" : "global",
         start: declared.token.start,
@@ -598,13 +611,189 @@ export const analyzePawn = (text: string): PawnAnalysis => {
         isArray: declared.isArray,
         tag: declared.tag,
         detail: text.slice(tokens[declStart].start, tokens[declEnd - 1].end),
-      });
+      };
+      addSymbol(symbols, variableSymbol);
+      if (!declared.tag && initializer) {
+        pendingInitializers.push({ symbol: variableSymbol, expression: initializer });
+      }
     });
 
     index = statementEnd;
   }
 
+  // Infer variable initializer tags and function return tags together.
+  const inferencePassLimit = Math.max(1, functions.length + pendingInitializers.length + 1);
+  for (let pass = 0; pass < inferencePassLimit; pass++) {
+    let changed = false;
+
+    pendingInitializers.forEach(({ symbol, expression }) => {
+      if (symbol.tag || symbol.inferredTag) return;
+      const inferred = inferPawnExpressionTag(expression, symbols, symbol.start);
+      if (inferred) {
+        symbol.inferredTag = inferred;
+        changed = true;
+      }
+    });
+
+    functions.forEach((region) => {
+      const functionSymbol = symbols.find((symbol) =>
+        symbol.kind === "function" &&
+        symbol.name === region.name &&
+        symbol.start < region.start
+      );
+      if (!functionSymbol || functionSymbol.tag || functionSymbol.inferredTag) return;
+
+      const returnExpressions: Array<{ expression: string; offset: number }> = [];
+      for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index];
+        if (
+          token.kind !== "identifier" ||
+          token.value.toLowerCase() !== "return" ||
+          token.start < region.start ||
+          token.start >= region.end
+        ) continue;
+
+        let end = index + 1;
+        while (
+          end < tokens.length &&
+          tokens[end].start < region.end &&
+          !isPunctuation(tokens[end], ";") &&
+          !isPunctuation(tokens[end], "}")
+        ) end++;
+        if (end > index + 1) {
+          returnExpressions.push({
+            expression: text.slice(tokens[index + 1].start, tokens[end - 1].end),
+            offset: token.start,
+          });
+        }
+      }
+
+      if (returnExpressions.length === 0) return;
+      const inferred = returnExpressions.map(({ expression, offset }) =>
+        inferPawnExpressionTag(expression, symbols, offset)
+      );
+      const firstTag = inferred[0];
+      if (firstTag && inferred.every((tag) => tag === firstTag)) {
+        functionSymbol.inferredTag = firstTag;
+        changed = true;
+      }
+    });
+
+    if (!changed) break;
+  }
+
   return { text, tokens, symbols };
+};
+
+/**
+ * Infer tags only when the expression provides a clear answer. This is a
+ * lightweight IntelliSense aid, not a replacement for Pawn compiler checks.
+ */
+export const inferPawnExpressionTag = (
+  expression: string,
+  symbols: readonly PawnSymbol[],
+  offset = Number.MAX_SAFE_INTEGER
+): string | undefined => {
+  let source = expression.trim();
+  if (!source) return undefined;
+
+  let tokens = tokenizePawn(source).filter((token) => token.kind !== "comment");
+  if (tokens.length === 0) return undefined;
+
+  // Remove redundant outer parentheses.
+  while (tokens[0]?.value === "(" && tokens[tokens.length - 1]?.value === ")") {
+    let depth = 0;
+    let closesAtEnd = false;
+    for (let index = 0; index < tokens.length; index++) {
+      if (tokens[index].value === "(") depth++;
+      else if (tokens[index].value === ")") {
+        depth--;
+        if (depth === 0) {
+          closesAtEnd = index === tokens.length - 1;
+          break;
+        }
+      }
+    }
+    if (!closesAtEnd) break;
+    source = source.slice(tokens[0].end, tokens[tokens.length - 1].start).trim();
+    tokens = tokenizePawn(source).filter((token) => token.kind !== "comment");
+  }
+
+  if (tokens.length === 1) {
+    const token = tokens[0];
+    if (token.kind === "number" && /[.eE]/.test(token.value)) return "Float";
+    if (token.kind === "identifier" && /^(?:true|false)$/i.test(token.value)) return "bool";
+    if (token.kind === "identifier") {
+      const symbol = symbols
+        .filter((candidate) =>
+          candidate.name.toLowerCase() === token.value.toLowerCase() &&
+          ["local", "parameter", "global", "enumMember"].includes(candidate.kind) &&
+          candidate.start <= offset &&
+          offset >= candidate.scopeStart &&
+          offset <= candidate.scopeEnd
+        )
+        .sort((left, right) => right.start - left.start)[0];
+      return symbol?.tag || symbol?.inferredTag;
+    }
+    return undefined;
+  }
+
+  // Explicit tag cast, e.g. Float:(value).
+  if (tokens[0].kind === "identifier" && isPunctuation(tokens[1], ":")) {
+    return tokens[0].value;
+  }
+
+  // Function or macro invocation.
+  if (tokens[0].kind === "identifier" && isPunctuation(tokens[1], "(")) {
+    const close = findMatching(tokens, 1, "(", ")");
+    if (close === tokens.length - 1) {
+      const callable = symbols.find((candidate) =>
+        (candidate.kind === "function" || candidate.kind === "macro") &&
+        candidate.name.toLowerCase() === tokens[0].value.toLowerCase()
+      );
+      if (callable) return callable.tag || callable.inferredTag;
+    }
+  }
+
+  // Array element access preserves the array's tag.
+  if (tokens[0].kind === "identifier" && isPunctuation(tokens[1], "[")) {
+    const array = symbols
+      .filter((candidate) =>
+        candidate.name.toLowerCase() === tokens[0].value.toLowerCase() &&
+        ["local", "parameter", "global"].includes(candidate.kind) &&
+        candidate.start <= offset &&
+        offset >= candidate.scopeStart &&
+        offset <= candidate.scopeEnd
+      )
+      .sort((left, right) => right.start - left.start)[0];
+    if (array) return array.tag || array.inferredTag;
+  }
+
+  const compact = tokens.map((token) => token.value).join("");
+  const logicalOperator = tokens.some((token, index) =>
+    (token.value === "&" && tokens[index + 1]?.value === "&") ||
+    (token.value === "|" && tokens[index + 1]?.value === "|")
+  );
+  if (
+    /(?:==|!=|<=|>=|<|>)/.test(compact) ||
+    logicalOperator ||
+    tokens.some((token) => token.kind === "identifier" &&
+      /^(?:and|or|not)$/i.test(token.value))
+  ) return "bool";
+
+  // Float arithmetic is tagged Float when it contains a Float operand.
+  if (tokens.some((token) =>
+    token.kind === "number" && /[.eE]/.test(token.value)
+  )) return "Float";
+  const referencedNames = new Set(tokens
+    .filter((token) => token.kind === "identifier")
+    .map((token) => token.value.toLowerCase()));
+  if (symbols.some((symbol) =>
+    referencedNames.has(symbol.name.toLowerCase()) &&
+    (symbol.tag || symbol.inferredTag) === "Float"
+  )) return "Float";
+
+  return undefined;
 };
 
 export const resolvePawnSymbol = (
@@ -635,7 +824,9 @@ export const resolvePawnSymbol = (
   );
   if (declaration) return declaration;
 
-  const nextToken = analysis.tokens.find((token) => token.start === currentToken.end);
+  const nextToken = analysis.tokens.find((token) =>
+    token.start >= currentToken.end && token.kind !== "comment"
+  );
   if (nextToken?.value === ":") {
     for (const candidate of workspace) {
       const typeSymbol = candidate.symbols.find((symbol) =>

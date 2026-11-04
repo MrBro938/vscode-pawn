@@ -6,6 +6,12 @@ const {
   getPawnMacroSignature
 } = require("../out/server/completion.js");
 const { findFunctionIdentifier } = require("../out/server/function.js");
+const {
+  formatPawnFunctionSignature,
+  formatPawnSymbolHover,
+  formatPawnCompletionDetail,
+  getPawnSignatureParameters
+} = require("../out/server/symbolDisplay.js");
 
 const mainUri = "file:///workspace/gamemodes/main.pwn";
 const includeUri = "file:///workspace/dependencies/project.inc";
@@ -93,8 +99,8 @@ assert.equal(
 );
 assert.equal(
   byName.get("localvalue").detail,
-  "bool:localValue",
-  "the innermost visible declaration should win when a local shadows an outer local"
+  "Local variable · bool",
+  "completion should show the tag of the innermost visible declaration"
 );
 assert.equal(
   byName.get("g_precedence").detail,
@@ -146,3 +152,51 @@ assert.deepEqual(
 );
 
 console.log("Pawn completion and signature help tests passed.");
+
+
+const signatureAnalysis = analyzePawn([
+  "stock Float:Calculate(Float:left, const Float:right[]) {",
+  "    return left + right[0];",
+  "}"
+].join("\n"));
+const calculate = signatureAnalysis.symbols.find(
+  (symbol) => symbol.kind === "function" && symbol.name === "Calculate"
+);
+assert.equal(
+  formatPawnFunctionSignature(calculate),
+  "Float:Calculate(Float:left, const Float:right[])",
+  "function signature display should include return and parameter tags"
+);
+assert.deepEqual(
+  getPawnSignatureParameters(calculate),
+  [{ label: "Float:left" }, { label: "const Float:right[]" }],
+  "Signature Help parameters should preserve tag and array declarations"
+);
+assert.match(
+  formatPawnSymbolHover(calculate),
+  /Returns:\*\* Float/,
+  "function Hover should display its return tag"
+);
+assert.match(
+  formatPawnSymbolHover(calculate),
+  /Float:right\[\]/,
+  "function Hover should display parameter tags and array markers"
+);
+assert.equal(
+  formatPawnCompletionDetail(calculate),
+  "Function · returns Float",
+  "function completion should show its return tag"
+);
+const healthSymbol = analyzePawn("new Float:health;").symbols.find(
+  (symbol) => symbol.name === "health" && symbol.kind === "global"
+);
+assert.match(
+  formatPawnSymbolHover(healthSymbol),
+  /health.*Float/,
+  "variable Hover should show its tag"
+);
+assert.equal(
+  formatPawnCompletionDetail(healthSymbol),
+  "Global variable · Float",
+  "variable completion should show its tag"
+);

@@ -3,7 +3,8 @@ const assert = require("node:assert/strict");
 const {
   analyzePawn,
   resolvePawnSymbol,
-  getBoundOccurrences
+  getBoundOccurrences,
+  inferPawnExpressionTag
 } = require("../out/server/analysis.js");
 const {
   tokenizePawn,
@@ -275,3 +276,41 @@ assert.ok(
 );
 
 console.log("Pawn function invocation detection tests passed.");
+
+
+const inferenceSource = [
+  "new Float:g_PlayerHealth;",
+  "stock CalculateBonus(Float:base) {",
+  "    return base + 1.0;",
+  "}",
+  "stock IsPlayerReady(bool:ready) {",
+  "    return ready && true;",
+  "}",
+  "public TestInference() {",
+  "    new copiedHealth = g_PlayerHealth;",
+  "    new calculatedBonus = CalculateBonus(g_PlayerHealth);",
+  "    new ready = IsPlayerReady(true);",
+  "}"
+].join("\n");
+const inferenceAnalysis = analyzePawn(inferenceSource);
+const inferred = (name, kind) => inferenceAnalysis.symbols.find(
+  (symbol) => symbol.name === name && symbol.kind === kind
+);
+assert.equal(inferred("copiedHealth", "local").inferredTag, "Float",
+  "an initializer that copies a tagged variable should infer its Pawn tag");
+assert.equal(inferred("calculatedBonus", "local").inferredTag, "Float",
+  "variable inference should use an inferred function return tag");
+assert.equal(inferred("ready", "local").inferredTag, "bool",
+  "variable inference should use bool-returning calls");
+assert.equal(inferred("CalculateBonus", "function").inferredTag, "Float",
+  "consistent Float return expressions should infer a function return tag");
+assert.equal(inferred("IsPlayerReady", "function").inferredTag, "bool",
+  "logical return expressions should infer bool");
+assert.equal(inferPawnExpressionTag("true", []), "bool",
+  "boolean literals should infer bool");
+assert.equal(inferPawnExpressionTag("1.25", []), "Float",
+  "decimal literals should infer Float");
+assert.equal(inferPawnExpressionTag("1 < 2", []), "bool",
+  "comparison expressions should infer bool");
+assert.equal(inferPawnExpressionTag("unknownValue", []), undefined,
+  "unknown identifiers must not receive a guessed tag");

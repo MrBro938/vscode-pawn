@@ -40,6 +40,11 @@ import {
   getPawnMacroSignature,
   PawnCompletionSource,
 } from "./completion";
+import {
+  formatPawnFunctionSignature,
+  formatPawnSymbolHover,
+  getPawnSignatureParameters,
+} from "./symbolDisplay";
 import { definitionTokens, parseDefinitions } from "./definition";
 import { isPawnFunctionInvocation, tokenizePawn } from "./symbols";
 import {
@@ -951,28 +956,25 @@ const doHover = (
   const content = document.getText();
   const cursorIndex = positionToIndex(content, position);
   const result = findIdentifierAtCursor(content, cursorIndex);
-  const snip = getFunctionInCompilationUnit(document.uri, result.identifier);
+  const currentAnalysis = getAnalysis(document.uri);
 
+  if (currentAnalysis && result.identifier) {
+    const workspace = getWorkspaceAnalyses(document.uri);
+    const symbol = resolvePawnSymbol(
+      currentAnalysis,
+      document.uri,
+      cursorIndex,
+      workspace.map((entry) => entry.analysis)
+    );
+    if (symbol) return { contents: [formatPawnSymbolHover(symbol)] };
+  }
+
+  const snip = getFunctionInCompilationUnit(document.uri, result.identifier);
   if (snip) {
     const contents: MarkedString[] = [];
     if (snip.completion.label !== undefined) contents.push(snip.completion.label);
     if (snip.completion.documentation !== undefined) {
       contents.push(String(snip.completion.documentation));
-    }
-    return { contents };
-  }
-
-  const macro = findFunctionSymbolInIncludeClosure(
-    document.uri,
-    result.identifier
-  );
-  if (macro?.symbol.kind === "macro") {
-    const contents: MarkedString[] = [
-      macro.symbol.detail || macro.symbol.name,
-    ];
-    if (macro.symbol.documentation) contents.push(macro.symbol.documentation);
-    if (macro.symbol.macroReplacement) {
-      contents.push("Expands to: " + macro.symbol.macroReplacement);
     }
     return { contents };
   }
@@ -998,7 +1000,14 @@ const findFunctionSymbolInIncludeClosure = (
   uri: string,
   identifier: string
 ): { analysis: PawnAnalysis; symbol: PawnSymbol } | undefined => {
-  const visibleUris = getIncludedFileUris(uri, includeGraph);
+  const includedUris = getIncludedFileUris(uri, includeGraph);
+  const visibleUris = [
+    ...includedUris,
+    ...getCompilationUnitUris(uri, includeGraph).filter((candidate) =>
+      !includedUris.includes(candidate)
+    ),
+  ];
+
   for (const visibleUri of visibleUris) {
     ensureSymbolsIndexed(visibleUri);
     const analysis = getAnalysis(visibleUri);
@@ -1087,9 +1096,17 @@ const doSignHelp = (
   const macroSignature = resolved?.symbol.kind === "macro"
     ? getPawnMacroSignature(resolved.symbol)
     : undefined;
-  const parameters = macroSignature?.parameters || (resolved
-    ? getFunctionSignatureParameters(resolved.analysis, resolved.symbol)
-    : snip?.params || []);
+  const symbolParameters = resolved
+    ? getPawnSignatureParameters(resolved.symbol)
+    : undefined;
+  const parameters = macroSignature?.parameters ||
+    symbolParameters ||
+    (resolved
+      ? getFunctionSignatureParameters(resolved.analysis, resolved.symbol)
+      : snip?.params || []);
+  const functionSignature = resolved?.symbol.kind === "function"
+    ? formatPawnFunctionSignature(resolved.symbol)
+    : undefined;
 
   return {
     activeParameter: parameters.length > 0
@@ -1098,11 +1115,14 @@ const doSignHelp = (
     activeSignature: 0,
     signatures: [{
       label: macroSignature?.label ||
+        functionSignature ||
         resolved?.symbol.detail ||
         snip?.completion.label ||
         result.identifier,
       parameters,
-      documentation: macroSignature?.documentation || snip?.completion.documentation,
+      documentation: macroSignature?.documentation ||
+        resolved?.symbol.documentation ||
+        snip?.completion.documentation,
     }],
   };
 };
