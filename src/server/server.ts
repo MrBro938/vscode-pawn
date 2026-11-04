@@ -1000,13 +1000,10 @@ const findFunctionSymbolInIncludeClosure = (
   uri: string,
   identifier: string
 ): { analysis: PawnAnalysis; symbol: PawnSymbol } | undefined => {
-  const includedUris = getIncludedFileUris(uri, includeGraph);
-  const visibleUris = [
-    ...includedUris,
-    ...getCompilationUnitUris(uri, includeGraph).filter((candidate) =>
-      !includedUris.includes(candidate)
-    ),
-  ];
+  const visibleUris = new Set<string>([
+    ...getIncludedFileUris(uri, includeGraph),
+    ...getCompilationUnitUris(uri, includeGraph),
+  ]);
 
   for (const visibleUri of visibleUris) {
     ensureSymbolsIndexed(visibleUri);
