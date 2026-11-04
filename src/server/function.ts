@@ -105,13 +105,11 @@ export const findFunctionIdentifier = (
 ): FindFunctionIdentifierResult => {
   const allTokens = tokenizePawn(content);
   const containingToken = allTokens.find((token) =>
-    cursorIndex > token.start && cursorIndex < token.end
+    cursorIndex >= token.start &&
+    cursorIndex < token.end &&
+    (token.kind === "comment" || token.kind === "string")
   );
-
-  // A cursor inside a comment or string is not part of a function argument.
-  if (containingToken?.kind === "comment" || containingToken?.kind === "string") {
-    return { identifier: "", parameterIndex: 0 };
-  }
+  if (containingToken) return { identifier: "", parameterIndex: 0 };
 
   const tokens = allTokens.filter((token) =>
     token.start < cursorIndex &&
@@ -119,56 +117,64 @@ export const findFunctionIdentifier = (
     token.kind !== "string"
   );
 
-  let parenthesisDepth = 0;
-  let squareDepth = 0;
-  let curlyDepth = 0;
-  let parameterIndex = 0;
+  type Delimiter = "(" | "[" | "{";
+  interface CallContext {
+    delimiter: Delimiter;
+    identifier: string;
+    parameterIndex: number;
+  }
+  const stack: CallContext[] = [];
 
-  for (let index = tokens.length - 1; index >= 0; index--) {
-    const token = tokens[index];
-    if (token.kind !== "punctuation") continue;
+  tokens.forEach((token, index) => {
+    if (token.kind !== "punctuation") return;
 
-    switch (token.value) {
-      case ")":
-        parenthesisDepth++;
-        break;
-      case "(":
-        if (parenthesisDepth > 0) {
-          parenthesisDepth--;
-          break;
-        }
+    if (token.value === "(" || token.value === "[") {
+      const previous = tokens[index - 1];
+      stack.push({
+        delimiter: token.value,
+        identifier: previous?.kind === "identifier" ? previous.value : "",
+        parameterIndex: 0,
+      });
+      return;
+    }
 
-        // Only an identifier followed by an opening parenthesis is a call.
-        const callee = tokens[index - 1];
-        if (callee?.kind !== "identifier") {
-          return { identifier: "", parameterIndex: 0 };
-        }
-        return {
-          identifier: callee.value,
-          parameterIndex,
-        };
-      case "]":
-        squareDepth++;
-        break;
-      case "[":
-        squareDepth = Math.max(0, squareDepth - 1);
-        break;
-      case "}":
-        curlyDepth++;
-        break;
-      case "{":
-        curlyDepth = Math.max(0, curlyDepth - 1);
-        break;
-      case ",":
-        if (parenthesisDepth === 0 && squareDepth === 0 && curlyDepth === 0) {
-          parameterIndex++;
-        }
-        break;
-      case ";":
-        if (parenthesisDepth === 0 && squareDepth === 0 && curlyDepth === 0) {
-          return { identifier: "", parameterIndex: 0 };
-        }
-        break;
+    if (token.value === "{") {
+      stack.push({ delimiter: "{", identifier: "", parameterIndex: 0 });
+      return;
+    }
+
+    if (token.value === ")" || token.value === "]" || token.value === "}") {
+      const expected = token.value === ")" ? "(" : token.value === "]" ? "[" : "{";
+      if (stack[stack.length - 1]?.delimiter === expected) stack.pop();
+      return;
+    }
+
+    const active = stack[stack.length - 1];
+    if (token.value === "," && active && active.delimiter !== "{") {
+      active.parameterIndex++;
+      return;
+    }
+
+    // A semicolon ends an expression unless it belongs to a parenthesized
+    // construct such as a for-loop header.
+    if (
+      token.value === ";" &&
+      !stack.some((context) => context.delimiter === "(" || context.delimiter === "[")
+    ) {
+      stack.length = 0;
+    }
+  });
+
+  for (let index = stack.length - 1; index >= 0; index--) {
+    const context = stack[index];
+    if (
+      (context.delimiter === "(" || context.delimiter === "[") &&
+      context.identifier
+    ) {
+      return {
+        identifier: context.identifier,
+        parameterIndex: context.parameterIndex,
+      };
     }
   }
 
