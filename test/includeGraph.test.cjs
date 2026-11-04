@@ -204,6 +204,13 @@ assert.deepEqual(
   "configured compiler paths must not fall back to unrelated same-suffix files"
 );
 
+const includeClosureA = getIncludedFileUris(rootA, graph);
+assert.ok(includeClosureA.has(rootA), "include closure should contain the source file");
+assert.ok(includeClosureA.has(apiA), "include closure should contain direct include dependencies");
+assert.ok(includeClosureA.has(common), "include closure should contain transitive include dependencies");
+assert.ok(!includeClosureA.has(rootB), "include closure must not include another module's parent source");
+assert.ok(!includeClosureA.has(apiB), "include closure must not leak sibling-module dependencies");
+
 const isolated = getCompilationUnitUris("file:///workspace/other/isolated.pwn", graph);
 assert.deepEqual(
   Array.from(isolated),
