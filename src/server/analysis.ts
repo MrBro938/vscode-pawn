@@ -192,18 +192,18 @@ const findDeclaredName = (
     }
   }
 
-  const candidates: PawnToken[] = [];
+  let name: PawnToken | undefined;
+  let nameIndex = -1;
   for (let index = start; index < limit; index++) {
     const token = tokens[index];
     if (token.kind !== "identifier" || keywords.has(token.value.toLowerCase())) continue;
     if (isPunctuation(tokens[index + 1], ":")) continue;
-    candidates.push(token);
+    name = token;
+    nameIndex = index;
   }
 
-  const name = candidates[candidates.length - 1];
   if (!name) return undefined;
 
-  const nameIndex = tokens.indexOf(name);
   const isArray = isPunctuation(tokens[limit], "[");
   return { token: name, isArray, tag: getPawnTagBefore(tokens, nameIndex) };
 };

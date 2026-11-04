@@ -265,6 +265,33 @@ assert.equal(
 assert.ok(findMacro("MAX_PATH"), "simple constant-style defines should remain supported");
 assert.ok(!findMacro("HIDDEN_MACRO"), "defines inside block comments must not be indexed");
 
+// Exercise declaration parsing at a scale large enough to catch accidental
+// full-token-array rescans for every declaration.
+const stressDeclarationCount = 4096;
+const stressSource = Array.from(
+  { length: stressDeclarationCount },
+  (_, index) => `new Float:g_Stress${index};`
+).join("\n");
+const stressAnalysis = analyzePawn(stressSource);
+const stressGlobals = stressAnalysis.symbols.filter(
+  (symbol) => symbol.kind === "global"
+);
+assert.equal(
+  stressGlobals.length,
+  stressDeclarationCount,
+  "large files should retain every global declaration"
+);
+assert.equal(
+  stressGlobals[0].tag,
+  "Float",
+  "large-file declaration scanning should retain Pawn tags"
+);
+assert.equal(
+  stressGlobals[stressGlobals.length - 1].name,
+  `g_Stress${stressDeclarationCount - 1}`,
+  "large-file declaration scanning should preserve source order"
+);
+
 console.log("Pawn symbol analysis tests passed.");
 
 
