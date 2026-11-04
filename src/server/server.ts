@@ -96,10 +96,10 @@ interface SemanticTokensCacheEntry {
   result: ReturnType<SemanticTokensBuilder["build"]>;
 }
 
-// Retain only a couple of recent documents because full semantic token
-// responses for large Pawn files can be sizeable.
+// Keep a small LRU of recently requested document ranges. Range results are
+// much smaller than full-document token arrays, but still bounded in memory.
 const semanticTokensCache = new Map<string, SemanticTokensCacheEntry>();
-const MAX_SEMANTIC_TOKEN_CACHE_ENTRIES = 2;
+const MAX_SEMANTIC_TOKEN_CACHE_ENTRIES = 24;
 
 // Workspace include index. Each path suffix points to all matching files,
 // allowing includes to resolve independently of the including file's directory.
@@ -368,7 +368,7 @@ connection.onInitialize((params) => {
         ],
         tokenModifiers: ["declaration"],
       },
-      full: true,
+      range: true,
     },
   },
   };
@@ -911,13 +911,19 @@ const semanticLegend: SemanticTokensLegend = {
   tokenModifiers: ["declaration"],
 };
 
-connection.languages.semanticTokens.on((params) =>
+connection.languages.semanticTokens.onRange((params) =>
   performanceStats.measure("semanticTokens.request", () => {
   const document = documents.get(params.textDocument.uri);
   if (!document) return { data: [] };
 
+  const rangeStart = document.offsetAt(params.range.start);
+  const rangeEnd = document.offsetAt(params.range.end);
+  if (rangeEnd <= rangeStart) return { data: [] };
+
   const analysis = getAnalysis(document.uri);
   if (!analysis) return { data: [] };
+
+  const cacheKey = `${document.uri}:${rangeStart}:${rangeEnd}`;
 
   // Semantic coloring only needs declarations from this file and the
   // files it actually includes. Walking the full compilation unit also pulls
@@ -944,7 +950,7 @@ connection.languages.semanticTokens.on((params) =>
       if (includedAnalysis) workspace.push({ uri, analysis: includedAnalysis });
     });
   });
-  const cachedTokens = semanticTokensCache.get(document.uri);
+  const cachedTokens = semanticTokensCache.get(cacheKey);
   if (
     cachedTokens &&
     cachedTokens.analysis === analysis &&
@@ -954,9 +960,9 @@ connection.languages.semanticTokens.on((params) =>
     )
   ) {
     performanceStats.count("semanticTokens.cacheHits");
-    // Refresh insertion order so the most recently used documents survive.
-    semanticTokensCache.delete(document.uri);
-    semanticTokensCache.set(document.uri, cachedTokens);
+    // Refresh insertion order so the most recently used ranges survive.
+    semanticTokensCache.delete(cacheKey);
+    semanticTokensCache.set(cacheKey, cachedTokens);
     return cachedTokens.result;
   }
   performanceStats.count("semanticTokens.cacheMisses");
@@ -1005,12 +1011,34 @@ connection.languages.semanticTokens.on((params) =>
     }
   );
 
+  // Token arrays are ordered by source offset. Binary-search the requested
+  // range so classification and line/character conversion touch visible tokens
+  // only, even when the main Pawn file contains hundreds of thousands of tokens.
+  let low = 0;
+  let high = analysis.tokens.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (analysis.tokens[middle].start < rangeStart) low = middle + 1;
+    else high = middle;
+  }
+  const firstTokenIndex = low;
+
+  low = firstTokenIndex;
+  high = analysis.tokens.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (analysis.tokens[middle].start < rangeEnd) low = middle + 1;
+    else high = middle;
+  }
+  const endTokenIndex = low;
+
   const typeAnnotationStarts = new Set<number>();
-  for (let index = 0; index < analysis.tokens.length - 1; index++) {
+  for (let index = firstTokenIndex; index < endTokenIndex; index++) {
     const token = analysis.tokens[index];
     const next = analysis.tokens[index + 1];
     if (
       token.kind === "identifier" &&
+      next !== undefined &&
       token.end === next.start &&
       next.kind === "punctuation" &&
       next.value === ":"
@@ -1026,8 +1054,11 @@ connection.languages.semanticTokens.on((params) =>
   const tokenTypeIndex = new Map(tokenTypes.map((type, index) => [type, index]));
   const builder = new SemanticTokensBuilder();
 
-  performanceStats.measure("semanticTokens.classifyTokens", () =>
-  analysis.tokens.forEach((token, tokenIndex) => {
+  let processedTokenCount = 0;
+  performanceStats.measure("semanticTokens.classifyTokens", () => {
+  for (let tokenIndex = firstTokenIndex; tokenIndex < endTokenIndex; tokenIndex++) {
+    const token = analysis.tokens[tokenIndex];
+    processedTokenCount++;
     let tokenType: string | undefined;
     let isDeclaration = false;
 
@@ -1088,23 +1119,23 @@ connection.languages.semanticTokens.on((params) =>
       typeIndex,
       isDeclaration ? 1 : 0
     );
-  })
-  );
+  }
+  });
 
   const result = builder.build();
-  performanceStats.count("semanticTokens.inputTokens", analysis.tokens.length);
+  performanceStats.count("semanticTokens.inputTokens", processedTokenCount);
   performanceStats.count("semanticTokens.outputEntries", Math.floor(result.data.length / 5));
 
-  semanticTokensCache.delete(document.uri);
-  semanticTokensCache.set(document.uri, {
+  semanticTokensCache.delete(cacheKey);
+  semanticTokensCache.set(cacheKey, {
     analysis,
     includedAnalyses: workspace.map((entry) => entry.analysis),
     result,
   });
   while (semanticTokensCache.size > MAX_SEMANTIC_TOKEN_CACHE_ENTRIES) {
-    const oldestUri = semanticTokensCache.keys().next().value;
-    if (oldestUri === undefined) break;
-    semanticTokensCache.delete(oldestUri);
+    const oldestKey = semanticTokensCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    semanticTokensCache.delete(oldestKey);
   }
 
   return result;
