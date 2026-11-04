@@ -300,9 +300,12 @@ const collectSymbols = (textDocument: TextDocument, includeWords = true) => {
   parseDefinitions(textDocument);
   parseFunctions(textDocument);
   if (includeWords) parseWords(textDocument);
+  const cachedAnalysis = analysisCache.get(textDocument.uri);
   analysisCache.set(textDocument.uri, {
     text,
-    analysis: analyzePawn(text),
+    analysis: cachedAnalysis?.text === text
+      ? cachedAnalysis.analysis
+      : analyzePawn(text),
   });
   indexedSymbolTexts.set(textDocument.uri, text);
   completionCache.clear();
