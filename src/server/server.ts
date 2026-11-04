@@ -73,6 +73,7 @@ import {
 import { resolveIncludeConfiguration } from "./includeConfig";
 import { PerformanceMonitor } from "../performance";
 import {
+  createSemanticTokensProjectDependencySnapshot,
   getSemanticTokensDependencyInvalidationReason,
   SemanticTokensDependencySnapshot,
 } from "./semanticTokensCache";
@@ -120,9 +121,14 @@ const markCompletionSourceStale = (uri: string) => {
 const indexedSymbolTexts = new Map<string, string>();
 let semanticTokensRefreshSupported = false;
 
-interface SemanticTokensContext extends SemanticTokensDependencySnapshot<PawnAnalysis> {
-  analysis: PawnAnalysis;
+interface SemanticTokensProjectSymbols extends SemanticTokensDependencySnapshot<PawnAnalysis> {
   projectKinds: Map<string, PawnSymbol["kind"]>;
+  sourceSymbols: number;
+}
+
+interface SemanticTokensContext {
+  analysis: PawnAnalysis;
+  projectSymbols: SemanticTokensProjectSymbols;
   localSymbolsByName: Map<string, PawnSymbol[]>;
   declarations: Map<number, PawnSymbol>;
 }
@@ -142,7 +148,22 @@ const bumpSemanticTokensFileVersion = (uri: string) => {
 const getSemanticTokensFileVersion = (uri: string) =>
   semanticTokensFileVersions.get(uri) || 0;
 
+const touchSemanticTokensProjectSymbols = (
+  documentUri: string,
+  projectSymbols: SemanticTokensProjectSymbols
+) => {
+  semanticTokensProjectSymbolsCache.delete(documentUri);
+  semanticTokensProjectSymbolsCache.set(documentUri, projectSymbols);
+  while (semanticTokensProjectSymbolsCache.size > MAX_SEMANTIC_TOKEN_PROJECT_INDEXES) {
+    const oldestUri = semanticTokensProjectSymbolsCache.keys().next().value;
+    if (oldestUri === undefined) break;
+    semanticTokensProjectSymbolsCache.delete(oldestUri);
+    performanceStats.count("semanticTokens.projectIndexCacheEvictions");
+  }
+};
+
 const isSemanticTokensContextCurrent = (
+  documentUri: string,
   context: SemanticTokensContext,
   analysis: PawnAnalysis
 ): boolean => performanceStats.measure("semanticTokens.contextValidation", () => {
@@ -153,7 +174,7 @@ const isSemanticTokensContextCurrent = (
   }
 
   const reason = getSemanticTokensDependencyInvalidationReason(
-    context,
+    context.projectSymbols,
     semanticTokensGraphGeneration,
     getSemanticTokensFileVersion,
     (uri) => analysisCache.get(uri)?.analysis
@@ -166,8 +187,9 @@ const isSemanticTokensContextCurrent = (
 
   performanceStats.count(
     "semanticTokens.contextValidationFiles",
-    context.sourceVersions.size
+    context.projectSymbols.sourceVersions.size
   );
+  touchSemanticTokensProjectSymbols(documentUri, context.projectSymbols);
   return true;
 });
 
@@ -177,6 +199,8 @@ const semanticTokensCache = new Map<string, SemanticTokensCacheEntry>();
 const MAX_SEMANTIC_TOKEN_CACHE_ENTRIES = 24;
 const semanticTokensContextCache = new Map<string, SemanticTokensContext>();
 const MAX_SEMANTIC_TOKEN_CONTEXTS = 8;
+const semanticTokensProjectSymbolsCache = new Map<string, SemanticTokensProjectSymbols>();
+const MAX_SEMANTIC_TOKEN_PROJECT_INDEXES = 8;
 
 // Workspace include index. Each path suffix points to all matching files,
 // allowing includes to resolve independently of the including file's directory.
@@ -1073,6 +1097,95 @@ const semanticLegend: SemanticTokensLegend = {
   tokenModifiers: ["declaration"],
 };
 
+const getSemanticTokensProjectSymbols = (
+  documentUri: string
+): SemanticTokensProjectSymbols => {
+  const cached = semanticTokensProjectSymbolsCache.get(documentUri);
+  const invalidationReason = cached
+    ? getSemanticTokensDependencyInvalidationReason(
+        cached,
+        semanticTokensGraphGeneration,
+        getSemanticTokensFileVersion,
+        (uri) => analysisCache.get(uri)?.analysis
+      )
+    : undefined;
+
+  if (cached && invalidationReason === undefined) {
+    performanceStats.count("semanticTokens.projectIndexCacheHits");
+    touchSemanticTokensProjectSymbols(documentUri, cached);
+    return cached;
+  }
+
+  if (cached && invalidationReason) {
+    performanceStats.count(
+      `semanticTokens.projectIndexInvalidation.${invalidationReason}`
+    );
+    semanticTokensProjectSymbolsCache.delete(documentUri);
+  }
+
+  performanceStats.count("semanticTokens.projectIndexCacheMisses");
+  const includedUris = performanceStats.measure(
+    "semanticTokens.includeClosure",
+    () => getIncludedFileUris(documentUri, includeGraph)
+  );
+  performanceStats.count(
+    "semanticTokens.includeFiles",
+    Math.max(0, includedUris.size - 1)
+  );
+
+  const dependencies = performanceStats.measure(
+    "semanticTokens.analysisPreparation",
+    () => createSemanticTokensProjectDependencySnapshot(
+      documentUri,
+      semanticTokensGraphGeneration,
+      includedUris,
+      getSemanticTokensFileVersion,
+      (uri) => {
+        performanceStats.count("semanticTokens.filesVisited");
+        const before = analysisCache.get(uri);
+        const text = getDocumentText(uri);
+        if (text !== undefined && (!before || before.text !== text)) {
+          performanceStats.count("semanticTokens.filesParsedOnDemand");
+        }
+        return performanceStats.measure(
+          "semanticTokens.getAnalysis",
+          () => getAnalysis(uri)
+        );
+      }
+    )
+  );
+
+  const sourceSymbols = Array.from(dependencies.sourceAnalyses.values())
+    .reduce((total, analysis) => total + analysis.symbols.length, 0);
+  const projectKinds = performanceStats.measure(
+    "semanticTokens.projectSymbolIndex",
+    () => {
+      const index = new Map<string, PawnSymbol["kind"]>();
+      dependencies.sourceAnalyses.forEach((analysis) => {
+        analysis.symbols.forEach((symbol) => {
+          if (!index.has(symbol.name) ||
+              symbol.kind === "function" ||
+              symbol.kind === "macro" ||
+              symbol.kind === "enum" ||
+              symbol.kind === "enumMember" ||
+              symbol.kind === "type") {
+            index.set(symbol.name, symbol.kind);
+          }
+        });
+      });
+      return index;
+    }
+  );
+
+  const result: SemanticTokensProjectSymbols = {
+    ...dependencies,
+    projectKinds,
+    sourceSymbols,
+  };
+  touchSemanticTokensProjectSymbols(documentUri, result);
+  return result;
+};
+
 connection.languages.semanticTokens.onRange((params) =>
   performanceStats.measure("semanticTokens.request", () => {
   const document = documents.get(params.textDocument.uri);
@@ -1089,7 +1202,7 @@ connection.languages.semanticTokens.onRange((params) =>
   const cachedTokens = semanticTokensCache.get(cacheKey);
   if (
     cachedTokens &&
-    isSemanticTokensContextCurrent(cachedTokens.context, analysis)
+    isSemanticTokensContextCurrent(document.uri, cachedTokens.context, analysis)
   ) {
     performanceStats.count("semanticTokens.cacheHits");
     semanticTokensCache.delete(cacheKey);
@@ -1102,65 +1215,16 @@ connection.languages.semanticTokens.onRange((params) =>
   let context = semanticTokensContextCache.get(document.uri);
   if (
     !context ||
-    !isSemanticTokensContextCurrent(context, analysis)
+    !isSemanticTokensContextCurrent(document.uri, context, analysis)
   ) {
     performanceStats.count("semanticTokens.contextCacheMisses");
 
-    // Only rebuild the include workspace and symbol indexes after a real
-    // source/analysis/graph change. Scrolling through a file reuses this context.
-    const includedUris = performanceStats.measure(
-      "semanticTokens.includeClosure",
-      () => getIncludedFileUris(document.uri, includeGraph)
-    );
-    performanceStats.count("semanticTokens.includeFiles", includedUris.size);
-
-    const workspace: WorkspacePawnAnalysis[] = [];
-    const sourceVersions = new Map<string, number>();
-    const sourceAnalyses = new Map<string, PawnAnalysis>();
-    performanceStats.measure("semanticTokens.analysisPreparation", () => {
-      includedUris.forEach((uri) => {
-        performanceStats.count("semanticTokens.filesVisited");
-        const before = analysisCache.get(uri);
-        const text = getDocumentText(uri);
-        if (text !== undefined && (!before || before.text !== text)) {
-          performanceStats.count("semanticTokens.filesParsedOnDemand");
-        }
-        const includedAnalysis = performanceStats.measure(
-          "semanticTokens.getAnalysis",
-          () => getAnalysis(uri)
-        );
-        if (includedAnalysis) {
-          workspace.push({ uri, analysis: includedAnalysis });
-          sourceVersions.set(uri, getSemanticTokensFileVersion(uri));
-          sourceAnalyses.set(uri, includedAnalysis);
-        }
-      });
-    });
-    sourceVersions.set(document.uri, getSemanticTokensFileVersion(document.uri));
-    sourceAnalyses.set(document.uri, analysis);
-    performanceStats.count("semanticTokens.sourceSymbols", workspace.reduce(
-      (total, entry) => total + entry.analysis.symbols.length,
-      0
-    ));
-
-    const projectKinds = performanceStats.measure(
-      "semanticTokens.projectSymbolIndex",
-      () => {
-        const index = new Map<string, PawnSymbol["kind"]>();
-        workspace.forEach((entry) => {
-          entry.analysis.symbols.forEach((symbol) => {
-            if (!index.has(symbol.name) ||
-                symbol.kind === "function" ||
-                symbol.kind === "macro" ||
-                symbol.kind === "enum" ||
-                symbol.kind === "enumMember" ||
-                symbol.kind === "type") {
-              index.set(symbol.name, symbol.kind);
-            }
-          });
-        });
-        return index;
-      }
+    // Project-wide include symbols are cached independently from the active
+    // document, so ordinary edits rebuild only document-local symbol data.
+    const projectSymbols = getSemanticTokensProjectSymbols(document.uri);
+    performanceStats.count(
+      "semanticTokens.sourceSymbols",
+      projectSymbols.sourceSymbols + analysis.symbols.length
     );
 
     const localSymbolsByName = performanceStats.measure(
@@ -1187,10 +1251,7 @@ connection.languages.semanticTokens.onRange((params) =>
 
     context = {
       analysis,
-      graphGeneration: semanticTokensGraphGeneration,
-      sourceVersions,
-      sourceAnalyses,
-      projectKinds,
+      projectSymbols,
       localSymbolsByName,
       declarations,
     };
@@ -1208,7 +1269,8 @@ connection.languages.semanticTokens.onRange((params) =>
     semanticTokensContextCache.set(document.uri, context);
   }
 
-  const { projectKinds, localSymbolsByName, declarations } = context;
+  const { projectSymbols, localSymbolsByName, declarations } = context;
+  const projectKinds = projectSymbols.projectKinds;
 
   // Token arrays are ordered by source offset. Binary-search the requested
   // range so only visible tokens are classified.

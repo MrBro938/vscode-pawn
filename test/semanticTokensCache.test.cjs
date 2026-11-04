@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const {
+  createSemanticTokensProjectDependencySnapshot,
   getSemanticTokensDependencyInvalidationReason,
   isSemanticTokensDependencySnapshotCurrent
 } = require("../out/server/semanticTokensCache.js");
@@ -86,3 +87,29 @@ assert.equal(
 );
 
 console.log("Semantic token dependency cache tests passed.");
+
+
+const projectSnapshot = createSemanticTokensProjectDependencySnapshot(
+  "main.pwn",
+  12,
+  ["main.pwn", "helpers.inc"],
+  (uri) => versions.get(uri) || 0,
+  (uri) => analyses.get(uri)
+);
+assert.deepEqual(
+  Array.from(projectSnapshot.sourceVersions.keys()),
+  ["helpers.inc"],
+  "the active document must not be part of the reusable project symbol snapshot"
+);
+versions.set("main.pwn", 4);
+analyses.set("main.pwn", { name: "main-v2" });
+assert.equal(
+  getSemanticTokensDependencyInvalidationReason(
+    projectSnapshot,
+    12,
+    (uri) => versions.get(uri) || 0,
+    (uri) => analyses.get(uri)
+  ),
+  undefined,
+  "editing the active document must not invalidate its included-project symbol index"
+);

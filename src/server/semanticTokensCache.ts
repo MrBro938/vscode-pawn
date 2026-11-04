@@ -44,3 +44,35 @@ export function isSemanticTokensDependencySnapshotCurrent<TAnalysis>(
     getCachedAnalysis
   ) === undefined;
 }
+
+
+/**
+ * Captures only files included by the active document, excluding the document
+ * itself. Its local analysis can change independently while this project
+ * symbol index remains valid.
+ */
+export function createSemanticTokensProjectDependencySnapshot<TAnalysis>(
+  documentUri: string,
+  graphGeneration: number,
+  includedUris: Iterable<string>,
+  getSourceVersion: (uri: string) => number,
+  getSourceAnalysis: (uri: string) => TAnalysis | undefined
+): SemanticTokensDependencySnapshot<TAnalysis> {
+  const sourceVersions = new Map<string, number>();
+  const sourceAnalyses = new Map<string, TAnalysis>();
+
+  for (const uri of includedUris) {
+    if (uri === documentUri) continue;
+    const analysis = getSourceAnalysis(uri);
+    if (analysis === undefined) continue;
+
+    sourceVersions.set(uri, getSourceVersion(uri));
+    sourceAnalyses.set(uri, analysis);
+  }
+
+  return {
+    graphGeneration,
+    sourceVersions,
+    sourceAnalyses,
+  };
+}
