@@ -96,7 +96,7 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
     const filePath = path.resolve(fileURLToPath(uri));
     const previousText = indexedPawnTexts.get(uri);
     const textChanged = text !== undefined && previousText !== text;
-    const includeGraphChanged = textChanged && (
+    const includeGraphChanged = text !== undefined && textChanged && (
       previousText === undefined ||
       JSON.stringify(extractPawnIncludes(previousText)) !==
         JSON.stringify(extractPawnIncludes(text))
