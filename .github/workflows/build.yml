@@ -51,10 +51,10 @@ jobs:
       - name: Package VS Code extension
         run: npx --yes @vscode/vsce package --out Pawn-Tools.vsix
 
-      - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload standalone VSIX artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: Pawn-Tools
           path: Pawn-Tools.vsix
+          archive: false
           if-no-files-found: error
           retention-days: 1
