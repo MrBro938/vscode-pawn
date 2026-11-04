@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const {
   createSemanticTokensProjectDependencySnapshot,
   getSemanticTokensDependencyInvalidationReason,
+  resolveSemanticTokenSymbolKind,
   isSemanticTokensDependencySnapshotCurrent
 } = require("../out/server/semanticTokensCache.js");
 
@@ -112,4 +113,21 @@ assert.equal(
   ),
   undefined,
   "editing the active document must not invalidate its included-project symbol index"
+);
+
+
+assert.equal(
+  resolveSemanticTokenSymbolKind("function", "global"),
+  "function",
+  "included function declarations retain their overriding priority"
+);
+assert.equal(
+  resolveSemanticTokenSymbolKind("global", "enum"),
+  "enum",
+  "the active document keeps priority over non-overriding included symbols"
+);
+assert.equal(
+  resolveSemanticTokenSymbolKind(undefined, "macro"),
+  "macro",
+  "the active document's own symbols remain visible in semantic highlighting"
 );

@@ -75,6 +75,7 @@ import { PerformanceMonitor } from "../performance";
 import {
   createSemanticTokensProjectDependencySnapshot,
   getSemanticTokensDependencyInvalidationReason,
+  resolveSemanticTokenSymbolKind,
   SemanticTokensDependencySnapshot,
 } from "./semanticTokensCache";
 
@@ -129,6 +130,7 @@ interface SemanticTokensProjectSymbols extends SemanticTokensDependencySnapshot<
 interface SemanticTokensContext {
   analysis: PawnAnalysis;
   projectSymbols: SemanticTokensProjectSymbols;
+  documentKinds: Map<string, PawnSymbol["kind"]>;
   localSymbolsByName: Map<string, PawnSymbol[]>;
   declarations: Map<number, PawnSymbol>;
 }
@@ -1247,11 +1249,23 @@ connection.languages.semanticTokens.onRange((params) =>
     );
 
     const declarations = new Map<number, PawnSymbol>();
-    analysis.symbols.forEach((symbol) => declarations.set(symbol.start, symbol));
+    const documentKinds = new Map<string, PawnSymbol["kind"]>();
+    analysis.symbols.forEach((symbol) => {
+      declarations.set(symbol.start, symbol);
+      if (!documentKinds.has(symbol.name) ||
+          symbol.kind === "function" ||
+          symbol.kind === "macro" ||
+          symbol.kind === "enum" ||
+          symbol.kind === "enumMember" ||
+          symbol.kind === "type") {
+        documentKinds.set(symbol.name, symbol.kind);
+      }
+    });
 
     context = {
       analysis,
       projectSymbols,
+      documentKinds,
       localSymbolsByName,
       declarations,
     };
@@ -1269,7 +1283,12 @@ connection.languages.semanticTokens.onRange((params) =>
     semanticTokensContextCache.set(document.uri, context);
   }
 
-  const { projectSymbols, localSymbolsByName, declarations } = context;
+  const {
+    projectSymbols,
+    documentKinds,
+    localSymbolsByName,
+    declarations,
+  } = context;
   const projectKinds = projectSymbols.projectKinds;
 
   // Token arrays are ordered by source offset. Binary-search the requested
@@ -1348,7 +1367,10 @@ connection.languages.semanticTokens.onRange((params) =>
             symbol.start <= token.start
           );
 
-          const kind = local?.kind || projectKinds.get(token.value);
+          const kind = local?.kind || resolveSemanticTokenSymbolKind(
+            projectKinds.get(token.value),
+            documentKinds.get(token.value)
+          );
           if (kind === "function") tokenType = "function";
           else if (kind === "macro") tokenType = "macro";
           else if (kind === "parameter") tokenType = "parameter";

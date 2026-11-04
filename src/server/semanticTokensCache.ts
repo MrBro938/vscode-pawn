@@ -76,3 +76,23 @@ export function createSemanticTokensProjectDependencySnapshot<TAnalysis>(
     sourceAnalyses,
   };
 }
+
+
+const OVERRIDING_SEMANTIC_SYMBOL_KINDS = new Set([
+  "function", "macro", "enum", "enumMember", "type"
+]);
+
+/**
+ * The active document is visited before its includes by the original index.
+ * Included declarations of overriding kinds win; otherwise prefer the active
+ * document's declaration when the same name exists in both places.
+ */
+export function resolveSemanticTokenSymbolKind<T extends string>(
+  projectKind: T | undefined,
+  documentKind: T | undefined
+): T | undefined {
+  if (projectKind && OVERRIDING_SEMANTIC_SYMBOL_KINDS.has(projectKind)) {
+    return projectKind;
+  }
+  return documentKind ?? projectKind;
+}
