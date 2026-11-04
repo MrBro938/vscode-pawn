@@ -358,11 +358,19 @@ export const analyzePawn = (text: string): PawnAnalysis => {
   const bracePairs = new Map<number, number>();
   const braceStack: number[] = [];
   const braceDepths: number[] = [];
+  const parenthesisPairs = new Map<number, number>();
+  const parenthesisStack: number[] = [];
   let braceDepth = 0;
 
   tokens.forEach((token, index) => {
     if (isPunctuation(token, "}")) braceDepth = Math.max(0, braceDepth - 1);
     braceDepths[index] = braceDepth;
+
+    if (isPunctuation(token, ")")) {
+      const open = parenthesisStack.pop();
+      if (open !== undefined) parenthesisPairs.set(open, index);
+    }
+    if (isPunctuation(token, "(")) parenthesisStack.push(index);
 
     if (isPunctuation(token, "{")) {
       braceStack.push(index);
@@ -373,6 +381,37 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     }
   });
 
+  // Precompute the innermost matched block for each token in one linear pass.
+  // Variable declarations can then resolve lexical scopes in O(1), instead of
+  // filtering and sorting every brace pair for every local variable.
+  const closeBraceToOpen = new Map<number, number>();
+  bracePairs.forEach((close, open) => closeBraceToOpen.set(close, open));
+  const matchedBraceStack: number[] = [];
+  const innermostBlockByToken: number[] = [];
+  tokens.forEach((token, index) => {
+    const closingOpen = closeBraceToOpen.get(index);
+    if (closingOpen !== undefined) {
+      while (
+        matchedBraceStack.length > 0 &&
+        matchedBraceStack[matchedBraceStack.length - 1] !== closingOpen
+      ) {
+        matchedBraceStack.pop();
+      }
+      if (matchedBraceStack[matchedBraceStack.length - 1] === closingOpen) {
+        matchedBraceStack.pop();
+      }
+    }
+
+    innermostBlockByToken[index] =
+      matchedBraceStack[matchedBraceStack.length - 1] ?? -1;
+
+    if (isPunctuation(token, "{") && bracePairs.has(index)) {
+      matchedBraceStack.push(index);
+    }
+  });
+
+  const functionModifierTokenIndexes = new Set<number>();
+
   // Pawn functions are declared at file scope. This prevents ordinary calls
   // inside function bodies from being mistaken for declarations.
   for (let index = 0; index < tokens.length - 1; index++) {
@@ -381,8 +420,25 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     if (nameToken.kind !== "identifier" || keywords.has(nameToken.value.toLowerCase())) continue;
     if (!isPunctuation(tokens[index + 1], "(")) continue;
 
-    const closeParen = findMatching(tokens, index + 1, "(", ")");
+    const closeParen = parenthesisPairs.get(index + 1) ?? -1;
     if (closeParen === -1 || !looksLikeFunctionDeclaration(text, tokens, index, closeParen)) continue;
+
+    // Remember static modifiers for this declaration so the variable pass
+    // does not scan the growing symbol list for every static token.
+    const declarationLineStart =
+      text.lastIndexOf("\n", Math.max(0, nameToken.start - 1)) + 1;
+    for (
+      let prefixIndex = index - 1;
+      prefixIndex >= 0 && tokens[prefixIndex].start >= declarationLineStart;
+      prefixIndex--
+    ) {
+      if (
+        tokens[prefixIndex].kind === "identifier" &&
+        tokens[prefixIndex].value.toLowerCase() === "static"
+      ) {
+        functionModifierTokenIndexes.add(prefixIndex);
+      }
+    }
 
     let next = closeParen + 1;
     if (isPunctuation(tokens[next], ":")) next += 2;
@@ -516,28 +572,33 @@ export const analyzePawn = (text: string): PawnAnalysis => {
   // Register Pawn #define macros, including positional parameters and patterns.
   extractPawnMacroSymbols(text, tokens).forEach((symbol) => addSymbol(symbols, symbol));
 
+  // Function regions are discovered in source order. Advance one cursor while
+  // scanning declarations instead of filtering and sorting all functions per
+  // variable declaration.
+  let functionRegionIndex = 0;
+
   // Discover new/static variable declarations and distinguish globals from locals.
   for (let index = 0; index < tokens.length; index++) {
+    while (
+      functionRegionIndex < functions.length &&
+      index >= functions[functionRegionIndex].closeToken
+    ) {
+      functionRegionIndex++;
+    }
     const keyword = tokens[index].value.toLowerCase();
     if (keyword !== "new" && keyword !== "static") continue;
     if (tokens[index].kind !== "identifier") continue;
 
-    // "static" can also be a function modifier. Do not parse the function
-    // header as a variable declaration.
-    if (keyword === "static") {
-      const lineEnd = text.indexOf("\n", tokens[index].start);
-      const declarationEnd = lineEnd === -1 ? text.length : lineEnd;
-      const isFunctionModifier = symbols.some((symbol) =>
-        symbol.kind === "function" &&
-        symbol.start > tokens[index].start &&
-        symbol.start < declarationEnd
-      );
-      if (isFunctionModifier) continue;
-    }
+    // "static" can also be a function modifier. Its token index was recorded
+    // while function declarations were discovered.
+    if (keyword === "static" && functionModifierTokenIndexes.has(index)) continue;
 
-    const functionRegion = functions
-      .filter((region) => tokens[index].start >= region.start && tokens[index].start <= region.end)
-      .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
+    const candidateRegion = functions[functionRegionIndex];
+    const functionRegion = candidateRegion &&
+      tokens[index].start >= candidateRegion.start &&
+      tokens[index].start <= candidateRegion.end
+      ? candidateRegion
+      : undefined;
 
     let statementEnd = index + 1;
     let round = 0;
@@ -566,22 +627,17 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     let scopeEnd = functionRegion ? functionRegion.end : text.length;
 
     if (functionRegion) {
-      const enclosingBlocks = Array.from(bracePairs.entries())
-        .filter(([open, close]) =>
-          open >= functionRegion.openToken &&
-          close <= functionRegion.closeToken &&
-          tokens[open].start < tokens[index].start &&
-          tokens[close].start > tokens[index].start
-        )
-        .sort((left, right) =>
-          (tokens[left[1]].start - tokens[left[0]].start) -
-          (tokens[right[1]].start - tokens[right[0]].start)
-        );
+      const innermostOpen = innermostBlockByToken[index];
+      const innermostClose = innermostOpen >= functionRegion.openToken
+        ? bracePairs.get(innermostOpen)
+        : undefined;
 
-      const innermostBlock = enclosingBlocks[0];
-      if (innermostBlock) {
-        scopeStart = tokens[innermostBlock[0]].end;
-        scopeEnd = tokens[innermostBlock[1]].start;
+      if (
+        innermostClose !== undefined &&
+        innermostClose <= functionRegion.closeToken
+      ) {
+        scopeStart = tokens[innermostOpen].end;
+        scopeEnd = tokens[innermostClose].start;
       }
     }
 

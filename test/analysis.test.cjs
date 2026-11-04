@@ -131,6 +131,38 @@ const nestedOccurrences = getBoundOccurrences(
 );
 assert.equal(nestedOccurrences.length, 2, "nested block local should only bind within its block");
 
+const nestedScopeSource = [
+  "static ScopedHelper() {",
+  "    new outerValue;",
+  "    if (true) {",
+  "        new innerValue;",
+  "    }",
+  "    new afterBlock;",
+  "}"
+].join("\n");
+const nestedScopeAnalysis = analyzePawn(nestedScopeSource);
+const scoped = (name) => nestedScopeAnalysis.symbols.find(
+  (symbol) => symbol.kind === "local" && symbol.name === name
+);
+const outerValue = scoped("outerValue");
+const innerValue = scoped("innerValue");
+const afterBlock = scoped("afterBlock");
+assert.ok(outerValue && innerValue && afterBlock,
+  "locals in nested function blocks should all be indexed");
+assert.ok(innerValue.scopeStart > outerValue.scopeStart,
+  "nested local scope should start after the outer function scope");
+assert.ok(innerValue.scopeEnd < outerValue.scopeEnd,
+  "nested local scope should end before the outer function scope");
+assert.equal(afterBlock.scopeStart, outerValue.scopeStart,
+  "locals after a nested block should return to the outer scope");
+assert.equal(afterBlock.scopeEnd, outerValue.scopeEnd,
+  "outer lexical scope should remain unchanged after a nested block");
+assert.equal(
+  nestedScopeAnalysis.symbols.filter((symbol) => symbol.kind === "function" && symbol.name === "ScopedHelper").length,
+  1,
+  "static function modifiers must not be indexed as variable declarations"
+);
+
 const typeOffset = source.indexOf("E_PLAYER:g_Player") + 2;
 const resolvedType = resolvePawnSymbol(analysis, uri, typeOffset, [analysis]);
 assert.equal(resolvedType.kind, "type", "enum tags should resolve in Pawn tag annotations");
