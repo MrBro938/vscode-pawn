@@ -358,3 +358,43 @@ assert.equal(inferPawnExpressionTag("1 < 2", []), "bool",
   "comparison expressions should infer bool");
 assert.equal(inferPawnExpressionTag("unknownValue", []), undefined,
   "unknown identifiers must not receive a guessed tag");
+
+
+const repeatedDeclarations = [];
+for (let index = 0; index < 250; index++) {
+  repeatedDeclarations.push(
+    `stock StressFunction${index}(playerid, Float:value) { new local${index} = value; return local${index}; }`
+  );
+}
+const repeatedAnalysis = analyzePawn(repeatedDeclarations.join("\\n"));
+assert.equal(
+  repeatedAnalysis.symbols.filter((symbol) => symbol.kind === "function" && symbol.name.startsWith("StressFunction")).length,
+  250,
+  "large files should index every function declaration"
+);
+assert.equal(
+  repeatedAnalysis.symbols.filter((symbol) => symbol.kind === "local" && symbol.name.startsWith("local")).length,
+  250,
+  "large files should index every local declaration"
+);
+
+const lineDocumentedMacros = analyzePawn([
+  "// first line",
+  "// second line",
+  "#define DOCUMENTED_LINE 1",
+  "",
+  "/**",
+  " * block documentation",
+  " */",
+  "#define DOCUMENTED_BLOCK 2"
+].join("\\n"));
+assert.equal(
+  lineDocumentedMacros.symbols.find((symbol) => symbol.name === "DOCUMENTED_LINE")?.documentation,
+  "first line\\nsecond line",
+  "adjacent line comments should remain macro documentation"
+);
+assert.equal(
+  lineDocumentedMacros.symbols.find((symbol) => symbol.name === "DOCUMENTED_BLOCK")?.documentation,
+  "block documentation",
+  "block comments should remain macro documentation"
+);
