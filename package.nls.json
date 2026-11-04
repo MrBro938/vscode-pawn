@@ -1,0 +1,17 @@
+{
+    "extension.displayName": "Pawn Tools",
+    "extension.description": "Pawn tools for VS Code. Includes syntax highlighting, snippets and completions for common libraries.",
+    "command.packageEnsure": "Ensure Package Dependencies",
+    "command.packageBuild": "Build Pawn Package",
+    "command.showPerformanceStats": "Pawn: Show Performance Statistics",
+    "command.togglePerformanceLogging": "Pawn: Toggle Performance Logging",
+    "command.resetPerformanceStats": "Pawn: Reset Performance Statistics",
+    "configuration.title": "Pawn Tools",
+    "setting.includePaths.description": "Additional Pawn include directories. Relative paths are resolved from each workspace folder.",
+    "setting.compilerPath.description": "Path to the Pawn compiler executable or its directory. Used to locate the adjacent pawn.cfg and standard include directory.",
+    "setting.performanceLogging.description": "Collect local performance statistics for workspace indexing, Pawn analysis, semantic tokens and IntelliSense requests.",
+    "setting.functionSearchScope.description": "Controls which files are searched for cross-file functions, native declarations and symbols in Completion, Hover, Go to Definition and Signature Help.",
+    "setting.functionSearchScope.includes": "Fastest: search the current file and files it includes recursively. Standard functions such as SetPlayerPos are found through a_samp.inc when it is included.",
+    "setting.functionSearchScope.compilationUnit": "Search the current file, its includes, and files that include it.",
+    "setting.functionSearchScope.workspace": "Search every indexed Pawn file in the workspace and configured include directories. This can be slower in large projects."
+}
