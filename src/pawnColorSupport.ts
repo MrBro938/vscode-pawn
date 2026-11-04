@@ -42,8 +42,9 @@ const hasUnescapedTrailingBackslash = (line: string): boolean => {
 /**
  * Finds Pawn/SA-MP color literals on one line without lexing the rest of a file.
  * Six digits are RGB; eight digits use the common Pawn/SA-MP RGBA layout.
- * Comments and quoted strings are skipped, including block comments and
- * backslash-continued strings carried across lines.
+ * Comments and ordinary quoted-string contents are skipped; {RRGGBB} tags
+ * inside strings are returned. Block comments and continued strings are
+ * tracked across line boundaries.
  */
 export const scanPawnColorLine = (
   line: string,
@@ -77,6 +78,31 @@ export const scanPawnColorLine = (
         escaped = true;
       } else if (current === quote) {
         quote = undefined;
+      } else if (current === "{") {
+        // SA-MP inline text color: {RRGGBB}. Only recognize this syntax
+        // inside a quoted Pawn string, never as an ordinary code token.
+        const colorEnd = index + 7;
+        if (
+          line[colorEnd] === "}" &&
+          isHexCharacter(line[index + 1]) &&
+          isHexCharacter(line[index + 2]) &&
+          isHexCharacter(line[index + 3]) &&
+          isHexCharacter(line[index + 4]) &&
+          isHexCharacter(line[index + 5]) &&
+          isHexCharacter(line[index + 6])
+        ) {
+          const digits = line.slice(index + 1, colorEnd);
+          colors.push({
+            startColumn: index,
+            endColumn: colorEnd + 1,
+            red: parseInt(digits.slice(0, 2), 16) / 255,
+            green: parseInt(digits.slice(2, 4), 16) / 255,
+            blue: parseInt(digits.slice(4, 6), 16) / 255,
+            alpha: 1,
+          });
+          index = colorEnd + 1;
+          continue;
+        }
       }
       index++;
       continue;
@@ -151,12 +177,13 @@ export const formatPawnColorLiteral = (
   color: PawnColorValue,
   originalLiteral: string
 ): string | undefined => {
-  const match = /^(0[xX])([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.exec(originalLiteral);
-  if (!match) return undefined;
+  const hexMatch = /^(0[xX])([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.exec(originalLiteral);
+  const textTagMatch = /^\{([0-9A-Fa-f]{6})\}$/.exec(originalLiteral);
+  if (!hexMatch && !textTagMatch) return undefined;
 
-  const originalDigits = match[2];
+  const originalDigits = hexMatch ? hexMatch[2] : textTagMatch![1];
   const uppercase = /[A-F]/.test(originalDigits) ||
-    (!/[a-f]/.test(originalDigits) && /X/.test(match[1]));
+    (!/[a-f]/.test(originalDigits) && !!hexMatch && /X/.test(hexMatch[1]));
   const formatByte = (value: number) => {
     const result = toHexByte(value);
     return uppercase ? result.toUpperCase() : result;
@@ -167,10 +194,14 @@ export const formatPawnColorLiteral = (
     formatByte(color.green),
     formatByte(color.blue),
   ].join("");
+
+  // SA-MP's {RRGGBB} string tag has no alpha component. Keep its exact
+  // six-digit shape even when the picker reports a transparent color.
+  if (textTagMatch) return `{${rgb}}`;
+
   const includeAlpha = originalDigits.length === 8 || color.alpha < 1;
   const alpha = includeAlpha ? formatByte(color.alpha) : "";
-
-  return match[1] + rgb + alpha;
+  return hexMatch![1] + rgb + alpha;
 };
 
 export const expandPawnViewportRanges = (

@@ -43,6 +43,86 @@ const ignored = scanPawnColorLine(
 );
 assert.equal(ignored.colors.length, 0, "color-like text in strings and line comments must be ignored");
 
+const saMpText = 'SendClientMessage(playerid, -1, "Привет {FFFFFF}Как {FF3333}твои дела?");';
+const saMpColors = scanPawnColorLine(saMpText);
+assert.equal(
+  saMpColors.colors.length,
+  2,
+  "SA-MP {RRGGBB} tags should be detected inside quoted Pawn text"
+);
+const whiteTagStart = saMpText.indexOf("{FFFFFF}");
+assert.equal(saMpColors.colors[0].startColumn, whiteTagStart);
+assert.equal(
+  saMpColors.colors[0].endColumn,
+  whiteTagStart + "{FFFFFF}".length,
+  "the color range should include both braces so the picker replaces the complete tag"
+);
+assert.deepEqual(
+  {
+    red: saMpColors.colors[0].red,
+    green: saMpColors.colors[0].green,
+    blue: saMpColors.colors[0].blue,
+    alpha: saMpColors.colors[0].alpha
+  },
+  { red: 1, green: 1, blue: 1, alpha: 1 },
+  "SA-MP inline text colors should be interpreted as opaque RGB"
+);
+assert.deepEqual(
+  formatPawnColorLiteral(
+    { red: 1, green: 0, blue: 0, alpha: 0.4 },
+    "{FFFFFF}"
+  ),
+  "{FF0000}",
+  "the picker should update RGB while preserving braces and six-digit SA-MP syntax"
+);
+assert.deepEqual(
+  formatPawnColorLiteral(
+    { red: 0, green: 0.5, blue: 1, alpha: 1 },
+    "{ffffff}"
+  ),
+  "{0080ff}",
+  "inline color formatting should preserve lowercase hex style"
+);
+assert.deepEqual(
+  formatPawnColorLiteral(
+    { red: 0, green: 0, blue: 0, alpha: 1 },
+    "{GGGGGG}"
+  ),
+  undefined,
+  "invalid inline color tags should not produce color presentations"
+);
+
+assert.equal(
+  scanPawnColorLine('new value = {FFFFFF};').colors.length,
+  0,
+  "brace hex values outside strings must not be treated as SA-MP text colors"
+);
+assert.equal(
+  scanPawnColorLine('// "message {FFFFFF}"').colors.length,
+  0,
+  "inline color-like text in line comments must be ignored"
+);
+assert.equal(
+  scanPawnColorLine('/* "message {FFFFFF}" */').colors.length,
+  0,
+  "inline color-like text in block comments must be ignored"
+);
+
+const continuedInlineStart = scanPawnColorLine(
+  'new text[] = "continued message ' + String.fromCharCode(92)
+);
+const continuedInlineEnd = scanPawnColorLine(
+  ' {00AAFF}";',
+  false,
+  continuedInlineStart.continuedQuote
+);
+assert.equal(
+  continuedInlineEnd.colors.length,
+  1,
+  "inline SA-MP colors should also be recognized in backslash-continued strings"
+);
+
+
 const blockStart = scanPawnColorLine("/* comment starts with 0xFF0000");
 assert.equal(blockStart.colors.length, 0);
 assert.equal(blockStart.inBlockComment, true);
