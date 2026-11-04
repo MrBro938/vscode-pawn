@@ -709,9 +709,11 @@ connection.onCompletion((params: CompletionParams): CompletionList =>
 
     const offset = document.offsetAt(params.position);
     const prefix = performanceStats.measure("completion.prefixExtraction", () => {
-      const prefixMatch = /[A-Za-z_@][A-Za-z0-9_@]*$/.exec(
-        document.getText().slice(0, offset)
-      );
+      const linePrefix = document.getText({
+        start: { line: params.position.line, character: 0 },
+        end: params.position,
+      });
+      const prefixMatch = /[A-Za-z_@][A-Za-z0-9_@]*$/.exec(linePrefix);
       return prefixMatch ? prefixMatch[0].toLowerCase() : "";
     });
     const items = buildCompletionItems(params.textDocument.uri, offset, prefix);
