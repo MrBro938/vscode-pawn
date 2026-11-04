@@ -664,7 +664,11 @@ connection.onDocumentSymbol((params) => {
   return document ? getDocumentSymbols(document) : [];
 });
 
-const buildCompletionItems = (uri: string, offset: number): CompletionItem[] => {
+const buildCompletionItems = (
+  uri: string,
+  offset: number,
+  prefix: string
+): CompletionItem[] => {
   const visibleUris = getFunctionSearchUris(uri);
   performanceStats.count("completion.includeFiles", visibleUris.size);
 
@@ -691,7 +695,7 @@ const buildCompletionItems = (uri: string, offset: number): CompletionItem[] => 
 
   const items = performanceStats.measure(
     "completion.buildItems",
-    () => buildPawnCompletionItems(uri, offset, sources)
+    () => buildPawnCompletionItems(uri, offset, sources, prefix)
   );
   performanceStats.count("completion.sources", sources.length);
   performanceStats.count("completion.candidateItems", items.length);
@@ -704,22 +708,16 @@ connection.onCompletion((params: CompletionParams): CompletionList =>
     if (!document) return { isIncomplete: false, items: [] };
 
     const offset = document.offsetAt(params.position);
-    const items = buildCompletionItems(params.textDocument.uri, offset);
-    const filteredItems = performanceStats.measure("completion.filterItems", () => {
+    const prefix = performanceStats.measure("completion.prefixExtraction", () => {
       const prefixMatch = /[A-Za-z_@][A-Za-z0-9_@]*$/.exec(
         document.getText().slice(0, offset)
       );
-      const prefix = prefixMatch ? prefixMatch[0].toLowerCase() : "";
-
-      return prefix
-        ? items.filter((item) =>
-            String(item.filterText || item.label).toLowerCase().startsWith(prefix)
-          )
-        : items;
+      return prefixMatch ? prefixMatch[0].toLowerCase() : "";
     });
-    performanceStats.count("completion.returnedItems", filteredItems.length);
+    const items = buildCompletionItems(params.textDocument.uri, offset, prefix);
+    performanceStats.count("completion.returnedItems", items.length);
 
-    return { isIncomplete: false, items: filteredItems };
+    return { isIncomplete: false, items };
   })
 );
 

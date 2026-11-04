@@ -62,6 +62,35 @@ const items = buildPawnCompletionItems(mainUri, cursorOffset, [
 ]);
 const byName = new Map(items.map((item) => [item.label.toLowerCase(), item]));
 
+const prefixedItems = buildPawnCompletionItems(mainUri, cursorOffset, [
+  { uri: mainUri, analysis: mainAnalysis },
+  { uri: includeUri, analysis: includeAnalysis },
+  { uri: secondIncludeUri, analysis: secondIncludeAnalysis }
+], "G_IN");
+assert.ok(prefixedItems.length > 0, "prefix filtering should retain matching symbols");
+assert.ok(
+  prefixedItems.every((item) =>
+    String(item.filterText || item.label).toLowerCase().startsWith("g_in")
+  ),
+  "prefix filtering should be case-insensitive and return only matching names"
+);
+assert.ok(
+  prefixedItems.some((item) => item.filterText === "g_IncludeTotal"),
+  "prefix filtering should preserve matching symbols from included files"
+);
+assert.ok(
+  !prefixedItems.some((item) => item.filterText === "IncludedFunction"),
+  "prefix filtering should skip non-matching functions before creating completion items"
+);
+const keywordPrefixItems = buildPawnCompletionItems(mainUri, cursorOffset, [
+  { uri: mainUri, analysis: mainAnalysis }
+], "ret");
+assert.deepEqual(
+  keywordPrefixItems.map((item) => item.filterText),
+  ["return"],
+  "prefix filtering should also apply to Pawn keywords"
+);
+
 assert.ok(byName.has("localvalue"), "visible local variable should be suggested");
 assert.ok(byName.has("nestedvalue"), "local variable in the active nested block should be suggested");
 assert.ok(byName.has("playerid"), "function parameters should be suggested inside the function");

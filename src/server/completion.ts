@@ -91,7 +91,8 @@ const pawnKeywords = [
 export const buildPawnCompletionItems = (
   currentUri: string,
   offset: number,
-  sources: readonly PawnCompletionSource[]
+  sources: readonly PawnCompletionSource[],
+  prefix = ""
 ): CompletionItem[] => {
   const current = sources.find((source) => source.uri === currentUri);
   const orderedSources = current
@@ -100,9 +101,11 @@ export const buildPawnCompletionItems = (
 
   const items: CompletionItem[] = [];
   const seen = new Set<string>();
+  const normalizedPrefix = prefix.toLowerCase();
 
   const add = (symbol: PawnSymbol) => {
     const key = symbol.name.toLowerCase();
+    if (normalizedPrefix && !key.startsWith(normalizedPrefix)) return;
     if (seen.has(key)) return;
     seen.add(key);
     items.push(toCompletionItem(symbol));
@@ -134,6 +137,7 @@ export const buildPawnCompletionItems = (
 
   pawnKeywords.forEach((keyword) => {
     const key = keyword.toLowerCase();
+    if (normalizedPrefix && !key.startsWith(normalizedPrefix)) return;
     if (seen.has(key)) return;
     seen.add(key);
     items.push({
