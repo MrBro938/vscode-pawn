@@ -41,7 +41,7 @@ import {
   PawnCompletionSource,
 } from "./completion";
 import { definitionTokens, parseDefinitions } from "./definition";
-import { tokenizePawn } from "./symbols";
+import { isPawnFunctionInvocation, tokenizePawn } from "./symbols";
 import {
   analyzePawn,
   getBoundOccurrences,
@@ -838,7 +838,7 @@ connection.languages.semanticTokens.on((params) => {
   const tokenTypeIndex = new Map(tokenTypes.map((type, index) => [type, index]));
   const builder = new SemanticTokensBuilder();
 
-  analysis.tokens.forEach((token) => {
+  analysis.tokens.forEach((token, tokenIndex) => {
     let tokenType: string | undefined;
     let isDeclaration = false;
 
@@ -878,7 +878,12 @@ connection.languages.semanticTokens.on((params) => {
         else if (kind === "enum") tokenType = "enum";
         else if (kind === "enumMember") tokenType = "enumMember";
         else if (kind === "type") tokenType = "type";
-        else tokenType = "variable";
+        else if (kind !== undefined) tokenType = "variable";
+        else if (isPawnFunctionInvocation(analysis.tokens, tokenIndex)) {
+          // Highlight calls even when their native declaration is only visible
+          // through the parent gamemode's includes, not this module's closure.
+          tokenType = "function";
+        } else tokenType = "variable";
       }
     }
 

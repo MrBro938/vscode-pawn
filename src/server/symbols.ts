@@ -111,3 +111,23 @@ export const findPawnIdentifierOccurrences = (
       token.value.toLowerCase() === normalized
   );
 };
+
+
+/**
+ * Return true when an identifier is used as a function-style invocation.
+ * This is a syntax-only fallback for semantic highlighting: a Pawn module may
+ * be included by a gamemode that imports natives such as a_samp, without
+ * including those declarations directly in the module itself.
+ */
+export const isPawnFunctionInvocation = (
+  tokens: PawnToken[],
+  tokenIndex: number
+): boolean => {
+  if (tokens[tokenIndex]?.kind !== "identifier") return false;
+
+  let nextIndex = tokenIndex + 1;
+  while (tokens[nextIndex]?.kind === "comment") nextIndex++;
+
+  return tokens[nextIndex]?.kind === "punctuation" &&
+    tokens[nextIndex].value === "(";
+};

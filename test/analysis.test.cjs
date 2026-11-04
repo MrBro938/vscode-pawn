@@ -5,6 +5,10 @@ const {
   resolvePawnSymbol,
   getBoundOccurrences
 } = require("../out/server/analysis.js");
+const {
+  tokenizePawn,
+  isPawnFunctionInvocation
+} = require("../out/server/symbols.js");
 
 const uri = "file:///workspace/gamemodes/test.pwn";
 const source = [
@@ -229,3 +233,48 @@ assert.ok(findMacro("MAX_PATH"), "simple constant-style defines should remain su
 assert.ok(!findMacro("HIDDEN_MACRO"), "defines inside block comments must not be indexed");
 
 console.log("Pawn symbol analysis tests passed.");
+
+
+const callSource = [
+  "PlayerTextDrawDestroy(playerid, textdraw);",
+  "PlayerTextDrawHideForPlayer /* comment */ (playerid, textdraw);",
+  "SomeNative // comment",
+  "    (playerid);",
+  "notAFunction;",
+  'printf("notAFunction(", playerid);',
+  "// HiddenFunction(playerid);"
+].join("\\n");
+const callTokens = tokenizePawn(callSource);
+const tokenIndex = (name, startAt = 0) => callTokens.findIndex((token, index) =>
+  index >= startAt && token.kind === "identifier" && token.value === name
+);
+assert.equal(
+  isPawnFunctionInvocation(callTokens, tokenIndex("PlayerTextDrawDestroy")),
+  true,
+  "native calls should be recognized without parsing an include declaration"
+);
+assert.equal(
+  isPawnFunctionInvocation(callTokens, tokenIndex("PlayerTextDrawHideForPlayer")),
+  true,
+  "comments between an identifier and opening parenthesis should not block call detection"
+);
+assert.equal(
+  isPawnFunctionInvocation(callTokens, tokenIndex("SomeNative")),
+  true,
+  "line comments between a function name and its opening parenthesis should be ignored"
+);
+assert.equal(
+  isPawnFunctionInvocation(callTokens, tokenIndex("notAFunction")),
+  false,
+  "plain identifiers must not be classified as function calls"
+);
+assert.equal(
+  callTokens.some((token, index) =>
+    token.value === "notAFunction" &&
+    isPawnFunctionInvocation(callTokens, index)
+  ),
+  false,
+  "function-like text inside strings and comments must not be treated as calls"
+);
+
+console.log("Pawn function invocation detection tests passed.");
