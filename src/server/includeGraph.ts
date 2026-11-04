@@ -1,37 +1,47 @@
 import * as path from "path";
 import { fileURLToPath } from "url";
 
-const normalizePath = (value: string): string => {
+export type PawnIncludeMode = "quoted" | "system";
+
+export interface PawnIncludeDirective {
+  path: string;
+  mode: PawnIncludeMode;
+}
+
+export const normalizePawnPath = (value: string): string => {
   const normalized = path.normalize(value);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 };
 
+const normalizeIncludePath = (value: string): string =>
+  value.replace(/[\\/]+/g, path.sep);
+
 const includeVariants = (includePath: string): string[] => {
-  const normalized = path.normalize(includePath.replace(/[\\/]+/g, path.sep));
+  const normalized = normalizeIncludePath(includePath);
   const variants = [normalized];
 
   if (!path.extname(normalized)) {
+    // Pawn compiler tries these extensions in this order. .pwn is retained
+    // as a compatibility fallback for projects that include source files.
     variants.push(
       normalized + ".inc",
-      normalized + ".pwn",
+      normalized + ".p",
       normalized + ".pawn",
-      normalized + ".p"
+      normalized + ".pwn"
     );
   }
 
   return variants;
 };
 
-export const extractPawnIncludes = (text: string): string[] => {
-  const includes: string[] = [];
+export const extractPawnIncludes = (text: string): PawnIncludeDirective[] => {
+  const includes: PawnIncludeDirective[] = [];
   const lines = text.split(/\r?\n/);
   let insideBlockComment = false;
 
   lines.forEach((line) => {
     let index = 0;
 
-    // Ignore comments before a preprocessor directive, including multi-line
-    // block comments. A commented-out #include must not create a graph edge.
     while (index < line.length) {
       if (insideBlockComment) {
         const close = line.indexOf("*/", index);
@@ -53,64 +63,97 @@ export const extractPawnIncludes = (text: string): string[] => {
 
     if (insideBlockComment) return;
 
-    const match = /^#\s*include\s*[<"]([^">]+)[">]/i.exec(line.slice(index));
-    const includePath = match?.[1]?.trim();
-    if (includePath) includes.push(includePath);
+    const match = /^#\s*include\s*([<"])([^">]+)([>"])/i.exec(line.slice(index));
+    if (!match) return;
+    if ((match[1] === "<" && match[3] !== ">") ||
+        (match[1] === '"' && match[3] !== '"')) return;
+
+    const includePath = match[2].trim();
+    if (!includePath) return;
+
+    includes.push({
+      path: includePath,
+      mode: match[1] === '"' ? "quoted" : "system",
+    });
   });
 
   return includes;
 };
 
+export const buildPawnPathIndex = (
+  indexedPawnFiles: ReadonlyMap<string, string>
+): Map<string, string> => {
+  const index = new Map<string, string>();
+  indexedPawnFiles.forEach((filePath, uri) => {
+    index.set(normalizePawnPath(filePath), uri);
+  });
+  return index;
+};
+
+const findInDirectory = (
+  directory: string,
+  variants: string[],
+  directPathIndex: ReadonlyMap<string, string>
+): string | undefined => {
+  for (const variant of variants) {
+    const candidate = path.resolve(directory, variant);
+    const match = directPathIndex.get(normalizePawnPath(candidate));
+    if (match) return match;
+  }
+  return undefined;
+};
+
 export const resolveIncludeUris = (
   sourceUri: string,
   includePath: string,
+  mode: PawnIncludeMode,
   indexedPawnFiles: ReadonlyMap<string, string>,
   includePathIndex: ReadonlyMap<string, ReadonlySet<string>>,
-  directPathIndex?: ReadonlyMap<string, string>
+  includeDirectories: readonly string[] = [],
+  suppliedDirectPathIndex?: ReadonlyMap<string, string>
 ): string[] => {
   if (!sourceUri.startsWith("file:")) return [];
 
   try {
     const sourceFile = fileURLToPath(sourceUri);
     const variants = includeVariants(includePath);
-    const indexedPaths = directPathIndex
-      ? undefined
-      : Array.from(indexedPawnFiles.entries());
+    const directPathIndex = suppliedDirectPathIndex ||
+      buildPawnPathIndex(indexedPawnFiles);
 
-    // Prefer a path relative to the including file. During graph construction,
-    // use the prebuilt normalized path map instead of scanning every file for
-    // every #include directive.
-    for (const variant of variants) {
-      const directPath = path.isAbsolute(variant)
-        ? path.normalize(variant)
-        : path.resolve(path.dirname(sourceFile), variant);
-      const normalizedDirectPath = normalizePath(directPath);
-      const directUri = directPathIndex?.get(normalizedDirectPath);
-      if (directUri) return [directUri];
-
-      const directMatch = indexedPaths?.find(
-        ([, filePath]) => normalizePath(filePath) === normalizedDirectPath
-      );
-      if (directMatch) return [directMatch[0]];
+    // Both quote and angle includes can be absolute, though this is uncommon.
+    if (path.isAbsolute(variants[0])) {
+      const absoluteMatch = variants
+        .map((variant) => directPathIndex.get(normalizePawnPath(path.resolve(variant))))
+        .find((uri): uri is string => uri !== undefined);
+      if (absoluteMatch) return [absoluteMatch];
     }
 
-    // Fall back to a suffix lookup. This handles project-style include paths
-    // such as "modules/feature/public/file.pwn" and "../shared/file.inc".
+    // Quoted includes are relative to the including file first. Angle includes
+    // deliberately do not search the source file's directory.
+    if (mode === "quoted") {
+      const localMatch = findInDirectory(
+        path.dirname(sourceFile),
+        variants,
+        directPathIndex
+      );
+      if (localMatch) return [localMatch];
+    }
+
+    // The ordered include directory list mirrors pawncc's -i search order.
+    // Return the first match only: later folders must not override an earlier
+    // compiler search path with a file bearing the same name.
+    for (const directory of includeDirectories) {
+      const match = findInDirectory(directory, variants, directPathIndex);
+      if (match) return [match];
+    }
+
+    // Compatibility fallback for workspaces without a usable pawn.json,
+    // pawn.cfg or compiler include path. Keep ambiguity visible instead of
+    // silently selecting an arbitrary same-suffix file.
     const matches = new Set<string>();
-
     variants.forEach((variant) => {
-      const parts = variant.split(/[\\/]+/);
-      while (
-        parts.length > 0 &&
-        (parts[0] === "" || parts[0] === "." || parts[0] === "..")
-      ) {
-        parts.shift();
-      }
-
-      const suffix = parts.join(path.sep);
-      if (!suffix) return;
-
-      const indexedMatches = includePathIndex.get(normalizePath(suffix));
+      const suffix = normalizePawnPath(variant.replace(/^\.([\\/])+/, ""));
+      const indexedMatches = includePathIndex.get(suffix);
       if (indexedMatches) indexedMatches.forEach((uri) => matches.add(uri));
     });
 
@@ -156,23 +199,23 @@ export const getIncludedFileUris = (
 export const buildPawnIncludeGraph = (
   indexedPawnFiles: ReadonlyMap<string, string>,
   indexedPawnTexts: ReadonlyMap<string, string>,
-  includePathIndex: ReadonlyMap<string, ReadonlySet<string>>
+  includePathIndex: ReadonlyMap<string, ReadonlySet<string>>,
+  includeDirectories: readonly string[] = []
 ): PawnIncludeGraph => {
   const graph: PawnIncludeGraph = new Map();
-  const directPathIndex = new Map<string, string>();
-  indexedPawnFiles.forEach((filePath, uri) => {
-    directPathIndex.set(normalizePath(filePath), uri);
-  });
+  const directPathIndex = buildPawnPathIndex(indexedPawnFiles);
 
   indexedPawnTexts.forEach((text, uri) => {
     const targets = new Set<string>();
 
-    extractPawnIncludes(text).forEach((includePath) => {
+    extractPawnIncludes(text).forEach((directive) => {
       resolveIncludeUris(
         uri,
-        includePath,
+        directive.path,
+        directive.mode,
         indexedPawnFiles,
         includePathIndex,
+        includeDirectories,
         directPathIndex
       ).forEach((targetUri) => targets.add(targetUri));
     });
@@ -180,7 +223,6 @@ export const buildPawnIncludeGraph = (
     graph.set(uri, targets);
   });
 
-  // Keep empty nodes for indexed files whose text is temporarily unavailable.
   indexedPawnFiles.forEach((_filePath, uri) => {
     if (!graph.has(uri)) graph.set(uri, new Set());
   });
@@ -189,10 +231,8 @@ export const buildPawnIncludeGraph = (
 };
 
 /**
- * Returns the full set of Pawn files belonging to the same compilation unit.
- * It walks up to all includers, finds their roots, then walks down all includes
- * from those roots. Sibling modules included by one gamemode are therefore
- * related, while unrelated workspace folders stay isolated.
+ * Returns all files connected to a source through include parents and children.
+ * This is used for cross-file symbol lookup, not for compiler include resolution.
  */
 export const getCompilationUnitUris = (
   sourceUri: string,
@@ -208,7 +248,6 @@ export const getCompilationUnitUris = (
   if (cached) return cached;
 
   const reverse = new Map<string, Set<string>>();
-
   graph.forEach((targets, source) => {
     targets.forEach((target) => {
       let parents = reverse.get(target);
@@ -222,7 +261,6 @@ export const getCompilationUnitUris = (
 
   const ancestors = new Set<string>([sourceUri]);
   const queue = [sourceUri];
-
   while (queue.length > 0) {
     const current = queue.shift()!;
     reverse.get(current)?.forEach((parent) => {
@@ -239,18 +277,15 @@ export const getCompilationUnitUris = (
 
   const compilationUnit = new Set<string>();
   const pending = [...seeds];
-
   while (pending.length > 0) {
     const current = pending.pop()!;
     if (compilationUnit.has(current)) continue;
     compilationUnit.add(current);
-
     graph.get(current)?.forEach((target) => {
       if (!compilationUnit.has(target)) pending.push(target);
     });
   }
 
-  // A graph entry may have not been built yet during initial workspace indexing.
   compilationUnit.add(sourceUri);
   graphCache.set(sourceUri, compilationUnit);
   return compilationUnit;
