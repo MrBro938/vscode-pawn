@@ -52,6 +52,9 @@ import {
   resolveIncludeUris,
   getIncludedFileUris,
   extractPawnIncludes,
+  buildPawnPathIndex,
+  normalizePawnPath,
+  PawnIncludeMode,
 } from "./includeGraph";
 import { resolveIncludeConfiguration } from "./includeConfig";
 
@@ -70,17 +73,20 @@ let semanticTokensRefreshSupported = false;
 const indexedPawnFiles = new Map<string, string>();
 const indexedPawnTexts = new Map<string, string>();
 const includePathIndex = new Map<string, Set<string>>();
+const indexedPawnPathIndex = new Map<string, string>();
 const configuredIncludeFileUris = new Set<string>();
 let includeGraph: PawnIncludeGraph = new Map();
 let configuredWorkspaceRoots: string[] = [];
 let configuredIncludePaths: string[] = [];
+let configuredIncludeDirectories: string[] = [];
 let configuredCompilerPath = "";
 
 const rebuildIncludeGraph = () => {
   includeGraph = buildPawnIncludeGraph(
     indexedPawnFiles,
     indexedPawnTexts,
-    includePathIndex
+    includePathIndex,
+    configuredIncludeDirectories
   );
 };
 
@@ -110,6 +116,7 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
     }
 
     indexedPawnFiles.set(uri, filePath);
+    indexedPawnPathIndex.set(normalizePawnPath(filePath), uri);
     if (text !== undefined) indexedPawnTexts.set(uri, text);
 
     const parts = filePath.split(path.sep);
@@ -139,6 +146,7 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
   if (!filePath) return;
 
   indexedPawnFiles.delete(uri);
+  indexedPawnPathIndex.delete(normalizePawnPath(filePath));
   indexedPawnTexts.delete(uri);
   indexedSymbolTexts.delete(uri);
   analysisCache.delete(uri);
@@ -247,6 +255,7 @@ const reloadConfiguredIncludes = () => {
     compilerPath: configuredCompilerPath,
   });
 
+  configuredIncludeDirectories = configuration.includeDirectories;
   configuration.includeDirectories.forEach((directory) => {
     scanIncludeDirectory(directory, configuredWorkspaceRoots, 20000);
   });
@@ -917,11 +926,14 @@ const resolveIncludeDefinition = (
   const line = lines[position.line];
   if (line === undefined) return undefined;
 
-  const match = /^\s*#\s*include\s*[<"]([^">]+)[">]/i.exec(line);
+  const match = /^\s*#\s*include\s*([<"])([^">]+)([>"])/i.exec(line);
   if (!match) return undefined;
+  if ((match[1] === "<" && match[3] !== ">") ||
+      (match[1] === '"' && match[3] !== '"')) return undefined;
 
-  const includePath = match[1].trim();
-  const pathStart = line.indexOf(match[1]);
+  const includePath = match[2].trim();
+  const includeMode: PawnIncludeMode = match[1] === '"' ? "quoted" : "system";
+  const pathStart = line.indexOf(match[2]);
   if (
     position.character < pathStart ||
     position.character > pathStart + match[1].length
@@ -935,8 +947,11 @@ const resolveIncludeDefinition = (
     const matchingUris = resolveIncludeUris(
       document.uri,
       includePath,
+      includeMode,
       indexedPawnFiles,
-      includePathIndex
+      includePathIndex,
+      configuredIncludeDirectories,
+      indexedPawnPathIndex
     );
 
     const locations = matchingUris.map((uri) =>
