@@ -662,10 +662,7 @@ connection.onDocumentSymbol((params) => {
 });
 
 const buildCompletionItems = (uri: string, offset: number): CompletionItem[] => {
-  const visibleUris = performanceStats.measure(
-    "completion.includeClosure",
-    () => getIncludedFileUris(uri, includeGraph)
-  );
+  const visibleUris = getFunctionSearchUris(uri);
   performanceStats.count("completion.includeFiles", visibleUris.size);
 
   const sources: PawnCompletionSource[] = [];

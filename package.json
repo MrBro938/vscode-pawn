@@ -165,7 +165,7 @@
                         "Search every indexed Pawn file in the workspace and configured include directories. This can be slower in large projects."
                     ],
                     "default": "includes",
-                    "description": "Controls which files are searched for cross-file functions, native declarations and symbols in Hover and Signature Help."
+                    "description": "Controls which files are searched for cross-file functions, native declarations and symbols in Completion, Hover, Go to Definition and Signature Help."
                 }
             }
         }
