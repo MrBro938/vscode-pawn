@@ -151,10 +151,30 @@ export const resolveIncludeUris = (
     // pawn.cfg or compiler include path. Keep ambiguity visible instead of
     // silently selecting an arbitrary same-suffix file.
     const matches = new Set<string>();
+    const localCandidatePaths = new Set(
+      variants.map((variant) =>
+        normalizePawnPath(path.resolve(path.dirname(sourceFile), variant))
+      )
+    );
     variants.forEach((variant) => {
-      const suffix = normalizePawnPath(variant.replace(/^\.([\\/])+/, ""));
+      const parts = variant.split(/[\\/]+/);
+      while (parts.length > 0 &&
+        (parts[0] === "" || parts[0] === "." || parts[0] === "..")) {
+        parts.shift();
+      }
+      const suffix = normalizePawnPath(parts.join(path.sep));
       const indexedMatches = includePathIndex.get(suffix);
-      if (indexedMatches) indexedMatches.forEach((uri) => matches.add(uri));
+      if (!indexedMatches) return;
+
+      indexedMatches.forEach((uri) => {
+        const indexedPath = indexedPawnFiles.get(uri);
+        if (
+          mode === "system" &&
+          indexedPath &&
+          localCandidatePaths.has(normalizePawnPath(indexedPath))
+        ) return;
+        matches.add(uri);
+      });
     });
 
     return Array.from(matches).sort();
