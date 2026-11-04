@@ -73,7 +73,7 @@ import {
 import { resolveIncludeConfiguration } from "./includeConfig";
 import { PerformanceMonitor } from "../performance";
 import {
-  isSemanticTokensDependencySnapshotCurrent,
+  getSemanticTokensDependencyInvalidationReason,
   SemanticTokensDependencySnapshot,
 } from "./semanticTokensCache";
 
@@ -146,22 +146,29 @@ const isSemanticTokensContextCurrent = (
   context: SemanticTokensContext,
   analysis: PawnAnalysis
 ): boolean => performanceStats.measure("semanticTokens.contextValidation", () => {
-  const current = context.analysis === analysis &&
-    isSemanticTokensDependencySnapshotCurrent(
-      context,
-      semanticTokensGraphGeneration,
-      getSemanticTokensFileVersion,
-      (uri) => analysisCache.get(uri)?.analysis
-    );
-  if (current) {
-    performanceStats.count(
-      "semanticTokens.contextValidationFiles",
-      context.sourceVersions.size
-    );
-  } else {
+  if (context.analysis !== analysis) {
     performanceStats.count("semanticTokens.contextValidationMisses");
+    performanceStats.count("semanticTokens.contextInvalidation.documentAnalysisChanged");
+    return false;
   }
-  return current;
+
+  const reason = getSemanticTokensDependencyInvalidationReason(
+    context,
+    semanticTokensGraphGeneration,
+    getSemanticTokensFileVersion,
+    (uri) => analysisCache.get(uri)?.analysis
+  );
+  if (reason) {
+    performanceStats.count("semanticTokens.contextValidationMisses");
+    performanceStats.count(`semanticTokens.contextInvalidation.${reason}`);
+    return false;
+  }
+
+  performanceStats.count(
+    "semanticTokens.contextValidationFiles",
+    context.sourceVersions.size
+  );
+  return true;
 });
 
 // Keep a small LRU of range responses plus one symbol-resolution context per
@@ -169,7 +176,7 @@ const isSemanticTokensContextCurrent = (
 const semanticTokensCache = new Map<string, SemanticTokensCacheEntry>();
 const MAX_SEMANTIC_TOKEN_CACHE_ENTRIES = 24;
 const semanticTokensContextCache = new Map<string, SemanticTokensContext>();
-const MAX_SEMANTIC_TOKEN_CONTEXTS = 2;
+const MAX_SEMANTIC_TOKEN_CONTEXTS = 8;
 
 // Workspace include index. Each path suffix points to all matching files,
 // allowing includes to resolve independently of the including file's directory.
@@ -1193,6 +1200,7 @@ connection.languages.semanticTokens.onRange((params) =>
       const oldestUri = semanticTokensContextCache.keys().next().value;
       if (oldestUri === undefined) break;
       semanticTokensContextCache.delete(oldestUri);
+      performanceStats.count("semanticTokens.contextCacheEvictions");
     }
   } else {
     performanceStats.count("semanticTokens.contextCacheHits");

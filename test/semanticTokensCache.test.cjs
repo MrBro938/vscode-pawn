@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const {
+  getSemanticTokensDependencyInvalidationReason,
   isSemanticTokensDependencySnapshotCurrent
 } = require("../out/server/semanticTokensCache.js");
 
@@ -36,16 +37,52 @@ const validate = (value = snapshot, graph = 12) =>
   );
 
 assert.equal(validate(), true, "unchanged dependencies should keep the context valid");
+assert.equal(
+  getSemanticTokensDependencyInvalidationReason(
+    snapshot, 12,
+    (uri) => versions.get(uri) || 0,
+    (uri) => analyses.get(uri)
+  ),
+  undefined,
+  "valid snapshots should not report an invalidation reason"
+);
 versions.set("unrelated.inc", 2);
 analyses.set("unrelated.inc", { name: "unrelated-v2" });
 assert.equal(validate(), true, "unrelated file changes must not invalidate the context");
 
 versions.set("helpers.inc", 8);
 assert.equal(validate(), false, "an included source edit must invalidate the context");
+assert.equal(
+  getSemanticTokensDependencyInvalidationReason(
+    snapshot, 12,
+    (uri) => versions.get(uri) || 0,
+    (uri) => analyses.get(uri)
+  ),
+  "sourceVersionChanged",
+  "included source edits should report the source version reason"
+);
 versions.set("helpers.inc", 7);
 analyses.set("helpers.inc", { name: "reparsed-include" });
 assert.equal(validate(), false, "a replaced cached analysis must invalidate the context");
+assert.equal(
+  getSemanticTokensDependencyInvalidationReason(
+    snapshot, 12,
+    (uri) => versions.get(uri) || 0,
+    (uri) => analyses.get(uri)
+  ),
+  "analysisChanged",
+  "replaced analyses should report the analysis reason"
+);
 analyses.set("helpers.inc", includeAnalysis);
 assert.equal(validate(snapshot, 13), false, "an include graph change must invalidate the context");
+assert.equal(
+  getSemanticTokensDependencyInvalidationReason(
+    snapshot, 13,
+    (uri) => versions.get(uri) || 0,
+    (uri) => analyses.get(uri)
+  ),
+  "graphChanged",
+  "include graph changes should report the graph version reason"
+);
 
 console.log("Semantic token dependency cache tests passed.");
