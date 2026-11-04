@@ -90,6 +90,17 @@ const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>(
 const indexedSymbolTexts = new Map<string, string>();
 let semanticTokensRefreshSupported = false;
 
+interface SemanticTokensCacheEntry {
+  analysis: PawnAnalysis;
+  includedAnalyses: PawnAnalysis[];
+  result: ReturnType<SemanticTokensBuilder["build"]>;
+}
+
+// Retain only a couple of recent documents because full semantic token
+// responses for large Pawn files can be sizeable.
+const semanticTokensCache = new Map<string, SemanticTokensCacheEntry>();
+const MAX_SEMANTIC_TOKEN_CACHE_ENTRIES = 2;
+
 // Workspace include index. Each path suffix points to all matching files,
 // allowing includes to resolve independently of the including file's directory.
 const indexedPawnFiles = new Map<string, string>();
@@ -933,6 +944,23 @@ connection.languages.semanticTokens.on((params) =>
       if (includedAnalysis) workspace.push({ uri, analysis: includedAnalysis });
     });
   });
+  const cachedTokens = semanticTokensCache.get(document.uri);
+  if (
+    cachedTokens &&
+    cachedTokens.analysis === analysis &&
+    cachedTokens.includedAnalyses.length === workspace.length &&
+    workspace.every((entry, index) =>
+      entry.analysis === cachedTokens.includedAnalyses[index]
+    )
+  ) {
+    performanceStats.count("semanticTokens.cacheHits");
+    // Refresh insertion order so the most recently used documents survive.
+    semanticTokensCache.delete(document.uri);
+    semanticTokensCache.set(document.uri, cachedTokens);
+    return cachedTokens.result;
+  }
+  performanceStats.count("semanticTokens.cacheMisses");
+
   performanceStats.count("semanticTokens.sourceSymbols", workspace.reduce(
     (total, entry) => total + entry.analysis.symbols.length,
     0
@@ -1066,6 +1094,19 @@ connection.languages.semanticTokens.on((params) =>
   const result = builder.build();
   performanceStats.count("semanticTokens.inputTokens", analysis.tokens.length);
   performanceStats.count("semanticTokens.outputEntries", Math.floor(result.data.length / 5));
+
+  semanticTokensCache.delete(document.uri);
+  semanticTokensCache.set(document.uri, {
+    analysis,
+    includedAnalyses: workspace.map((entry) => entry.analysis),
+    result,
+  });
+  while (semanticTokensCache.size > MAX_SEMANTIC_TOKEN_CACHE_ENTRIES) {
+    const oldestUri = semanticTokensCache.keys().next().value;
+    if (oldestUri === undefined) break;
+    semanticTokensCache.delete(oldestUri);
+  }
+
   return result;
   })
 );
