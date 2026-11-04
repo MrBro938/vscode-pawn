@@ -925,17 +925,17 @@ const resolveIncludeDefinition = (
   const line = lines[position.line];
   if (line === undefined) return undefined;
 
-  const match = /^\s*#\s*include\s*([<"])([^">]+)([>"])/i.exec(line);
+  const match = /^\s*#\s*include\s*(?:([<"])([^">]+)([>"])|([^\s]+))/i.exec(line);
   if (!match) return undefined;
   if ((match[1] === "<" && match[3] !== ">") ||
       (match[1] === '"' && match[3] !== '"')) return undefined;
 
-  const includePath = match[2].trim();
-  const includeMode: PawnIncludeMode = match[1] === '"' ? "quoted" : "system";
-  const pathStart = line.indexOf(match[2]);
+  const includePath = (match[2] || match[4] || "").trim();
+  const includeMode: PawnIncludeMode = match[1] === "<" ? "system" : "quoted";
+  const pathStart = line.indexOf(includePath);
   if (
     position.character < pathStart ||
-    position.character > pathStart + match[2].length
+    position.character > pathStart + includePath.length
   ) {
     return undefined;
   }
