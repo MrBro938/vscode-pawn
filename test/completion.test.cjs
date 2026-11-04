@@ -1,7 +1,10 @@
 const assert = require("node:assert/strict");
 
 const { analyzePawn } = require("../out/server/analysis.js");
-const { buildPawnCompletionItems } = require("../out/server/completion.js");
+const {
+  buildPawnCompletionItems,
+  getPawnMacroSignature
+} = require("../out/server/completion.js");
 const { findFunctionIdentifier } = require("../out/server/function.js");
 
 const mainUri = "file:///workspace/gamemodes/main.pwn";
@@ -32,6 +35,8 @@ const includeText = [
   "new G_TOTAL;",
   "new g_IncludeTotal;",
   "new g_Precedence;",
+  "#define SUM(%1,%2) ((%1)+(%2))",
+  "#define ARRAY_VALUE[%1] ArrayValues[%1]",
   "#define INCLUDE_LIMIT 10",
   "enum E_INCLUDE_STATE { E_INCLUDE_ACTIVE, E_INCLUDE_DISABLED }",
   "stock IncludedFunction(value) {",
@@ -60,7 +65,24 @@ assert.ok(!byName.has("hiddenincludelocal"), "locals from included files must no
 assert.ok(byName.has("getusername"), "native functions should be suggested");
 assert.ok(byName.has("includedfunction"), "functions from resolved includes should be suggested");
 assert.ok(byName.has("g_includetotal"), "globals from resolved includes should be suggested");
-assert.ok(byName.has("max_count"), "macros should be suggested");
+assert.ok(byName.has("max_count"), "simple macros should be suggested");
+const sumSymbol = includeAnalysis.symbols.find(
+  (symbol) => symbol.kind === "macro" && symbol.name === "SUM"
+);
+const sumItem = items.find((item) => item.filterText === "SUM");
+assert.ok(sumItem, "parameterized macro should be offered by completion");
+assert.equal(sumItem.label, "SUM(%1, %2)", "macro completion should show its Pawn placeholders");
+assert.equal(sumItem.insertText, "SUM($1,$2)$0", "macro completion should insert tab stops for each argument");
+assert.equal(sumItem.insertTextFormat, 2, "parameterized macro completion should use snippet insertion");
+
+const sumSignature = getPawnMacroSignature(sumSymbol);
+assert.equal(sumSignature.label, "SUM(%1, %2)", "macro Signature Help should show the pattern");
+assert.deepEqual(sumSignature.parameters, [{ label: "%1" }, { label: "%2" }]);
+assert.equal(
+  items.find((item) => item.filterText === "ARRAY_VALUE").insertText,
+  "ARRAY_VALUE[$1]$0",
+  "bracket-pattern macros should insert their matching syntax"
+);
 assert.ok(byName.has("e_include_active"), "enum members from includes should be suggested");
 assert.ok(byName.has("return"), "Pawn keywords should be suggested");
 
@@ -100,6 +122,27 @@ assert.deepEqual(
   findFunctionIdentifier("SomeStatement; notACall", "SomeStatement; notACall".length),
   { identifier: "", parameterIndex: 0 },
   "Signature Help should not attach to a previous completed statement"
+);
+
+const macroCall = "SUM(first, Nested(1, 2), ";
+assert.deepEqual(
+  findFunctionIdentifier(macroCall, macroCall.length),
+  { identifier: "SUM", parameterIndex: 1 },
+  "macro argument counting should ignore commas in nested calls"
+);
+
+const bracketMacroCall = "ARRAY_VALUE[playerid, ";
+assert.deepEqual(
+  findFunctionIdentifier(bracketMacroCall, bracketMacroCall.length),
+  { identifier: "ARRAY_VALUE", parameterIndex: 1 },
+  "Signature Help should also recognize Pawn macros that use bracket patterns"
+);
+
+const stringCall = 'SUM("first, value", ';
+assert.deepEqual(
+  findFunctionIdentifier(stringCall, stringCall.length),
+  { identifier: "SUM", parameterIndex: 1 },
+  "commas inside string arguments should not affect macro Signature Help"
 );
 
 console.log("Pawn completion and signature help tests passed.");
