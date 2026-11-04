@@ -19,6 +19,14 @@ export interface PawnSymbol {
   scopeEnd: number;
   isArray?: boolean;
   detail?: string;
+  /** Pawn preprocessor placeholders in the macro pattern, e.g. ["%1", "%2"]. */
+  macroParameters?: string[];
+  /** The pattern suffix immediately following the macro name, e.g. "(%1,%2)" or "[%1]". */
+  macroPattern?: string;
+  /** Text substituted by the preprocessor when the macro is invoked. */
+  macroReplacement?: string;
+  /** Documentation comment immediately preceding the #define directive. */
+  documentation?: string;
 }
 
 export interface PawnAnalysis {
@@ -173,6 +181,148 @@ const findDeclaredName = (
   return { token: name, isArray };
 };
 
+const getLeadingMacroDocumentation = (
+  text: string,
+  lineStart: number
+): string | undefined => {
+  const lines = text.slice(0, lineStart).split(/\r?\n/);
+  let index = lines.length - 1;
+
+  while (index >= 0 && !lines[index].trim()) index--;
+  if (index < 0) return undefined;
+
+  const lastLine = lines[index].trim();
+  if (lastLine.endsWith("*/")) {
+    const end = index;
+    while (index >= 0 && !lines[index].includes("/*")) index--;
+    if (index < 0) return undefined;
+    return lines.slice(index, end + 1)
+      .join("\n")
+      .replace(/^\s*\/\*\*?/, "")
+      .replace(/\*\/\s*$/, "")
+      .split("\n")
+      .map((line) => line.replace(/^\s*\* ?/, "").trimEnd())
+      .join("\n")
+      .trim() || undefined;
+  }
+
+  if (lastLine.startsWith("//")) {
+    const comments: string[] = [];
+    while (index >= 0 && lines[index].trim().startsWith("//")) {
+      comments.unshift(lines[index].replace(/^\s*\/\/!? ?/, ""));
+      index--;
+    }
+    return comments.join("\n").trim() || undefined;
+  }
+
+  return undefined;
+};
+
+/**
+ * Parse Pawn #define directives. Pawn macro arguments are positional
+ * placeholders (%1..%9 and %0) embedded in the match pattern, not named
+ * C-style parameters. A backslash at end of a directive joins the next line.
+ */
+const extractPawnMacroSymbols = (
+  text: string,
+  tokens: PawnToken[]
+): PawnSymbol[] => {
+  const symbols: PawnSymbol[] = [];
+  const nonCodeTokens = tokens.filter((token) =>
+    token.kind === "comment" || token.kind === "string"
+  );
+  let nonCodeIndex = 0;
+  let lineStart = 0;
+
+  const isInsideNonCode = (offset: number): boolean => {
+    while (
+      nonCodeIndex < nonCodeTokens.length &&
+      nonCodeTokens[nonCodeIndex].end <= offset
+    ) {
+      nonCodeIndex++;
+    }
+    const token = nonCodeTokens[nonCodeIndex];
+    return !!token && token.start <= offset && offset < token.end;
+  };
+
+  while (lineStart <= text.length) {
+    const firstLineEnd = text.indexOf("\n", lineStart);
+    const currentLineEnd = firstLineEnd === -1 ? text.length : firstLineEnd;
+    const firstLine = text.slice(lineStart, currentLineEnd).replace(/\r$/, "");
+    const directiveOffset = firstLine.search(/\S/);
+
+    if (
+      directiveOffset !== -1 &&
+      /^\s*#\s*define\b/.test(firstLine) &&
+      !isInsideNonCode(lineStart + directiveOffset)
+    ) {
+      let logicalLine = firstLine;
+      let finalLineEnd = currentLineEnd;
+
+      while (/\\\s*$/.test(logicalLine) && finalLineEnd < text.length) {
+        logicalLine = logicalLine.replace(/\\\s*$/, "");
+        const nextLineStart = finalLineEnd + 1;
+        const nextLineEndIndex = text.indexOf("\n", nextLineStart);
+        const nextLineEnd = nextLineEndIndex === -1
+          ? text.length
+          : nextLineEndIndex;
+        const nextLine = text.slice(nextLineStart, nextLineEnd).replace(/\r$/, "");
+        logicalLine += nextLine.replace(/^\s+/, "");
+        finalLineEnd = nextLineEnd;
+      }
+
+      const match = /^\s*#\s*define\s+([A-Za-z_@][A-Za-z0-9_@]*)/.exec(logicalLine);
+      if (match) {
+        const name = match[1];
+        const relativeNameStart = match[0].lastIndexOf(name);
+        const start = lineStart + relativeNameStart;
+        const tail = logicalLine.slice(relativeNameStart + name.length);
+
+        let macroPattern = "";
+        let macroReplacement = tail.trim();
+        // Pawn requires the macro matching pattern to be adjacent to its name.
+        if (tail && !/^\s/.test(tail)) {
+          const whitespace = tail.search(/\s/);
+          if (whitespace === -1) {
+            macroPattern = tail;
+            macroReplacement = "";
+          } else {
+            macroPattern = tail.slice(0, whitespace);
+            macroReplacement = tail.slice(whitespace).trim();
+          }
+        }
+
+        const macroParameters = Array.from(new Set(
+          macroPattern.match(/%[0-9]/g) || []
+        ));
+        const displayPattern = macroPattern.replace(/,/g, ", ");
+        const signature = name + displayPattern;
+        const documentation = getLeadingMacroDocumentation(text, lineStart);
+
+        addSymbol(symbols, {
+          name,
+          kind: "macro",
+          start,
+          end: start + name.length,
+          scopeStart: 0,
+          scopeEnd: text.length,
+          detail: macroPattern ? signature : undefined,
+          macroParameters,
+          macroPattern,
+          macroReplacement: macroReplacement || undefined,
+          documentation,
+        });
+      }
+
+      lineStart = finalLineEnd >= text.length ? text.length + 1 : finalLineEnd + 1;
+    } else {
+      lineStart = currentLineEnd >= text.length ? text.length + 1 : currentLineEnd + 1;
+    }
+  }
+
+  return symbols;
+};
+
 export const analyzePawn = (text: string): PawnAnalysis => {
   const tokens = tokenizePawn(text);
   const symbols: PawnSymbol[] = [];
@@ -315,20 +465,8 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     index = close;
   }
 
-  // Register #define declarations.
-  const definePattern = /^\s*#\s*define\s+([A-Za-z_@][A-Za-z0-9_@]*)/gm;
-  let defineMatch: RegExpExecArray | null;
-  while ((defineMatch = definePattern.exec(text)) !== null) {
-    const start = defineMatch.index + defineMatch[0].lastIndexOf(defineMatch[1]);
-    addSymbol(symbols, {
-      name: defineMatch[1],
-      kind: "macro",
-      start,
-      end: start + defineMatch[1].length,
-      scopeStart: 0,
-      scopeEnd: text.length,
-    });
-  }
+  // Register Pawn #define macros, including positional parameters and patterns.
+  extractPawnMacroSymbols(text, tokens).forEach((symbol) => addSymbol(symbols, symbol));
 
   // Discover new/static variable declarations and distinguish globals from locals.
   for (let index = 0; index < tokens.length; index++) {
