@@ -1,4 +1,4 @@
-import { join } from "path";
+import { isAbsolute, join, relative, resolve } from "path";
 import { readFile } from "fs";
 import * as vscode from "vscode";
 import { LanguageClient, ServerOptions, TransportKind } from "vscode-languageclient/node";
@@ -9,6 +9,99 @@ let clientReady = false;
 const pawnGlob = "**/*.{p,pwn,pawn,inc}";
 const excludedGlob = "**/{.git,node_modules,.vscode-test,dist,out}/**";
 const INDEX_BATCH_SIZE = 32;
+
+const externalIncludeWatchers = new Map<string, vscode.Disposable>();
+const pendingExternalFileEvents = new Map<string, ReturnType<typeof setTimeout>>();
+
+const normalizeDirectory = (directory: string) => {
+  const normalized = resolve(directory);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+};
+
+const isPathWithin = (parent: string, candidate: string) => {
+  const relativePath = relative(resolve(parent), resolve(candidate));
+  return relativePath === "" ||
+    (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+};
+
+const isInsideWorkspace = (directory: string) =>
+  (vscode.workspace.workspaceFolders || []).some((folder) =>
+    isPathWithin(folder.uri.fsPath, directory)
+  );
+
+const scheduleExternalFileEvent = (uri: vscode.Uri, deleted = false) => {
+  const key = uri.toString();
+  const pending = pendingExternalFileEvents.get(key);
+  if (pending) clearTimeout(pending);
+
+  // FileSystemWatcher can emit several events during one save or rename.
+  // Coalesce them so a file is read/indexed only once.
+  const timer = setTimeout(() => {
+    pendingExternalFileEvents.delete(key);
+    if (!clientReady) return;
+
+    if (deleted) {
+      void client.sendNotification("pawn/indexFiles", {
+        deleted: [key],
+      });
+    } else {
+      void readAndIndexFile(uri);
+    }
+  }, 100);
+
+  pendingExternalFileEvents.set(key, timer);
+};
+
+const updateExternalIncludeWatchers = (directories: string[]) => {
+  // Workspace files are already covered by the main workspace watcher.
+  const candidates = Array.from(new Set(
+    directories
+      .filter((directory) => typeof directory === "string" && !!directory.trim())
+      .map((directory) => resolve(directory))
+      .filter((directory) => !isInsideWorkspace(directory))
+  )).sort((left, right) => left.length - right.length);
+
+  // A recursive watcher on a parent also covers its nested include directories.
+  const desiredDirectories: string[] = [];
+  candidates.forEach((candidate) => {
+    if (desiredDirectories.some((parent) => isPathWithin(parent, candidate))) return;
+    desiredDirectories.push(candidate);
+  });
+
+  const desired = new Map(
+    desiredDirectories.map((directory) => [normalizeDirectory(directory), directory])
+  );
+
+  externalIncludeWatchers.forEach((disposable, key) => {
+    if (desired.has(key)) return;
+    disposable.dispose();
+    externalIncludeWatchers.delete(key);
+  });
+
+  desired.forEach((directory, key) => {
+    if (externalIncludeWatchers.has(key)) return;
+
+    const pattern = new vscode.RelativePattern(
+      vscode.Uri.file(directory),
+      "**/*.{p,pwn,pawn,inc}"
+    );
+    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+    const created = watcher.onDidCreate((uri) =>
+      scheduleExternalFileEvent(uri)
+    );
+    const changed = watcher.onDidChange((uri) =>
+      scheduleExternalFileEvent(uri)
+    );
+    const deleted = watcher.onDidDelete((uri) =>
+      scheduleExternalFileEvent(uri, true)
+    );
+
+    externalIncludeWatchers.set(
+      key,
+      vscode.Disposable.from(watcher, created, changed, deleted)
+    );
+  });
+};
 
 const readFileBytes = (uri: vscode.Uri): Promise<Buffer> =>
   new Promise((resolve, reject) => {
@@ -115,6 +208,22 @@ export async function activate(context: vscode.ExtensionContext) {
       documentSelector: [{ scheme: "file", language: "pawn" }],
     }
   );
+
+  context.subscriptions.push(
+    client.onNotification(
+      "pawn/includeDirectories",
+      (params: { directories?: string[] }) => {
+        updateExternalIncludeWatchers(params.directories || []);
+      }
+    )
+  );
+
+  context.subscriptions.push(new vscode.Disposable(() => {
+    externalIncludeWatchers.forEach((watcher) => watcher.dispose());
+    externalIncludeWatchers.clear();
+    pendingExternalFileEvents.forEach((timer) => clearTimeout(timer));
+    pendingExternalFileEvents.clear();
+  }));
 
   const watcher = vscode.workspace.createFileSystemWatcher(pawnGlob);
   watcher.onDidCreate(readAndIndexFile);
