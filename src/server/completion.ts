@@ -33,11 +33,11 @@ const toCompletionItem = (symbol: PawnSymbol): CompletionItem => ({
 });
 
 const pawnKeywords = [
-  "assert", "break", "case", "const", "continue", "decl", "default",
-  "defined", "do", "else", "enum", "exit", "false", "for", "forward",
-  "goto", "if", "native", "new", "not", "operator", "or", "public",
-  "return", "sizeof", "sleep", "state", "static", "stock", "switch",
-  "tagof", "true", "while"
+  "and", "assert", "bool", "break", "case", "char", "const", "continue",
+  "decl", "default", "defined", "do", "else", "enum", "exit", "false",
+  "for", "forward", "goto", "if", "native", "new", "not", "operator",
+  "or", "public", "return", "sizeof", "sleep", "state", "static", "stock",
+  "switch", "tagof", "true", "while"
 ];
 
 /**
