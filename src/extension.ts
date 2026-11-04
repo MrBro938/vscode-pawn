@@ -11,7 +11,8 @@ const excludedGlob = "**/{.git,node_modules,.vscode-test,dist,out}/**";
 const INDEX_BATCH_SIZE = 32;
 
 const externalIncludeWatchers = new Map<string, vscode.Disposable>();
-const pendingExternalFileEvents = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingExternalFileEvents = new Map<string, { uri: vscode.Uri; deleted: boolean }>();
+let externalIncludeFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
 const normalizeDirectory = (directory: string) => {
   const normalized = resolve(directory);
@@ -29,27 +30,50 @@ const isInsideWorkspace = (directory: string) =>
     isPathWithin(folder.uri.fsPath, directory)
   );
 
-const scheduleExternalFileEvent = (uri: vscode.Uri, deleted = false) => {
-  const key = uri.toString();
-  const pending = pendingExternalFileEvents.get(key);
-  if (pending) clearTimeout(pending);
+const flushExternalFileEvents = async () => {
+  if (!clientReady || pendingExternalFileEvents.size === 0) return;
 
-  // FileSystemWatcher can emit several events during one save or rename.
-  // Coalesce them so a file is read/indexed only once.
-  const timer = setTimeout(() => {
-    pendingExternalFileEvents.delete(key);
-    if (!clientReady) return;
+  const batch = Array.from(pendingExternalFileEvents.values());
+  pendingExternalFileEvents.clear();
 
-    if (deleted) {
-      void client.sendNotification("pawn/indexFiles", {
-        deleted: [key],
-      });
-    } else {
-      void readAndIndexFile(uri);
+  const deleted: string[] = [];
+  const files: Array<{ uri: string; text: string }> = [];
+
+  await Promise.all(batch.map(async (event) => {
+    const uri = event.uri.toString();
+    if (event.deleted) {
+      deleted.push(uri);
+      return;
     }
-  }, 100);
 
-  pendingExternalFileEvents.set(key, timer);
+    // Open documents are indexed from their live editor contents by LSP.
+    if (isDocumentOpen(event.uri)) return;
+
+    try {
+      const bytes = await readFileBytes(event.uri);
+      files.push({ uri, text: bytes.toString("utf8") });
+    } catch {
+      // The file may have been removed between the watcher event and the read.
+      deleted.push(uri);
+    }
+  }));
+
+  if (deleted.length > 0 || files.length > 0) {
+    await client.sendNotification("pawn/indexFiles", { files, deleted });
+  }
+};
+
+const scheduleExternalFileEvent = (uri: vscode.Uri, deleted = false) => {
+  // Keep only the latest state for each path. A save, checkout or dependency
+  // update can touch hundreds of files; one batched LSP notification avoids
+  // rebuilding the include graph once per file.
+  pendingExternalFileEvents.set(uri.toString(), { uri, deleted });
+
+  if (externalIncludeFlushTimer) clearTimeout(externalIncludeFlushTimer);
+  externalIncludeFlushTimer = setTimeout(() => {
+    externalIncludeFlushTimer = undefined;
+    void flushExternalFileEvents();
+  }, 120);
 };
 
 const updateExternalIncludeWatchers = (directories: string[]) => {
@@ -221,7 +245,8 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(new vscode.Disposable(() => {
     externalIncludeWatchers.forEach((watcher) => watcher.dispose());
     externalIncludeWatchers.clear();
-    pendingExternalFileEvents.forEach((timer) => clearTimeout(timer));
+    if (externalIncludeFlushTimer) clearTimeout(externalIncludeFlushTimer);
+    externalIncludeFlushTimer = undefined;
     pendingExternalFileEvents.clear();
   }));
 
