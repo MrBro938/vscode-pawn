@@ -380,10 +380,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
       if (
         event.affectsConfiguration("pawn.includePaths") ||
-        event.affectsConfiguration("pawn.compilerPath") ||
-        event.affectsConfiguration("pawn.functionSearchScope")
+        event.affectsConfiguration("pawn.compilerPath")
       ) {
         void sendIncludeConfiguration();
+      }
+
+      if (event.affectsConfiguration("pawn.functionSearchScope") && clientReady) {
+        const scope = vscode.workspace
+          .getConfiguration("pawn")
+          .get<string>("functionSearchScope", "includes");
+        void client.sendNotification("pawn/functionSearchScope", { scope });
       }
     })
   );

@@ -104,6 +104,13 @@ let configuredIncludeDirectories: string[] = [];
 let configuredCompilerPath = "";
 let configuredFunctionSearchScope: PawnFunctionSearchScope = "includes";
 
+const setFunctionSearchScope = (scope?: string) => {
+  configuredFunctionSearchScope =
+    scope === "compilationUnit" || scope === "workspace"
+      ? scope
+      : "includes";
+};
+
 const rebuildIncludeGraph = () => performanceStats.measure(
   "include.graphRebuild",
   () => {
@@ -561,19 +568,15 @@ connection.onNotification(
       .filter((value) => typeof value === "string");
     configuredCompilerPath =
       typeof params.compilerPath === "string" ? params.compilerPath : "";
-    const supportedSearchScopes: PawnFunctionSearchScope[] = [
-      "includes",
-      "compilationUnit",
-      "workspace",
-    ];
-    configuredFunctionSearchScope = supportedSearchScopes.includes(
-      params.functionSearchScope as PawnFunctionSearchScope
-    )
-      ? params.functionSearchScope as PawnFunctionSearchScope
-      : "includes";
+    setFunctionSearchScope(params.functionSearchScope);
 
     reloadConfiguredIncludes();
   }
+);
+
+connection.onNotification(
+  "pawn/functionSearchScope",
+  (params: { scope?: string }) => setFunctionSearchScope(params.scope)
 );
 
 connection.onDidChangeConfiguration(() => {
