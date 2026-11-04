@@ -5,6 +5,7 @@ const {
   buildPawnIncludeGraph,
   extractPawnIncludes,
   getCompilationUnitUris,
+  getIncludedFileUris,
   resolveIncludeUris
 } = require("../out/server/includeGraph.js");
 
@@ -75,6 +76,17 @@ assert.deepEqual(
 const graph = buildPawnIncludeGraph(files, texts, pathIndex);
 const unitA = getCompilationUnitUris(rootA, graph);
 const unitB = getCompilationUnitUris(rootB, graph);
+const includedApiA = getIncludedFileUris(apiA, graph);
+assert.deepEqual(
+  Array.from(includedApiA).sort(),
+  [apiA, common].sort(),
+  "semantic dependencies should follow only this file's include chain"
+);
+assert.equal(
+  getIncludedFileUris(apiA, graph),
+  includedApiA,
+  "included-file traversal should be cached for repeated requests"
+);
 
 for (const uri of [rootA, apiA, sideA, common]) {
   assert.ok(unitA.has(uri), "mode A compilation unit should include " + uri);
