@@ -192,63 +192,39 @@ const findDeclaredName = (
     }
   }
 
-  const candidates: Array<{ token: PawnToken; index: number }> = [];
+  const candidates: PawnToken[] = [];
   for (let index = start; index < limit; index++) {
     const token = tokens[index];
     if (token.kind !== "identifier" || keywords.has(token.value.toLowerCase())) continue;
     if (isPunctuation(tokens[index + 1], ":")) continue;
-    candidates.push({ token, index });
+    candidates.push(token);
   }
 
   const name = candidates[candidates.length - 1];
   if (!name) return undefined;
 
+  const nameIndex = tokens.indexOf(name);
   const isArray = isPunctuation(tokens[limit], "[");
-  return {
-    token: name.token,
-    isArray,
-    tag: getPawnTagBefore(tokens, name.index),
-  };
+  return { token: name, isArray, tag: getPawnTagBefore(tokens, nameIndex) };
 };
 
 const getLeadingMacroDocumentation = (
   text: string,
   lineStart: number
 ): string | undefined => {
-  // Walk backward only through the adjacent documentation block. Avoid
-  // slicing and splitting the entire file once for every #define directive.
-  const readPreviousLine = (currentLineStart: number) => {
-    if (currentLineStart <= 0) return undefined;
-    const previousLineEnd = currentLineStart - 1; // index of the preceding LF
-    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
-    const line = text.slice(previousLineStart, previousLineEnd).replace(/\r$/, "");
-    return { start: previousLineStart, line };
-  };
+  const lines = text.slice(0, lineStart).split(/\r?\n/);
+  let index = lines.length - 1;
 
-  let cursor = lineStart;
-  let previous = readPreviousLine(cursor);
-  while (previous && !previous.line.trim()) {
-    cursor = previous.start;
-    previous = readPreviousLine(cursor);
-  }
-  if (!previous) return undefined;
+  while (index >= 0 && !lines[index].trim()) index--;
+  if (index < 0) return undefined;
 
-  const lastLine = previous.line.trim();
+  const lastLine = lines[index].trim();
   if (lastLine.endsWith("*/")) {
-    const lines = [previous.line];
-    cursor = previous.start;
-    let foundStart = previous.line.includes("/*");
-
-    while (!foundStart && cursor > 0) {
-      previous = readPreviousLine(cursor);
-      if (!previous) break;
-      lines.unshift(previous.line);
-      cursor = previous.start;
-      foundStart = previous.line.includes("/*");
-    }
-    if (!foundStart) return undefined;
-
-    return lines.join("\n")
+    const end = index;
+    while (index >= 0 && !lines[index].includes("/*")) index--;
+    if (index < 0) return undefined;
+    return lines.slice(index, end + 1)
+      .join("\n")
       .replace(/^\s*\/\*\*?/, "")
       .replace(/\*\/\s*$/, "")
       .split("\n")
@@ -258,14 +234,10 @@ const getLeadingMacroDocumentation = (
   }
 
   if (lastLine.startsWith("//")) {
-    const comments = [previous.line.replace(/^\s*\/\/!? ?/, "")];
-    cursor = previous.start;
-
-    while (cursor > 0) {
-      previous = readPreviousLine(cursor);
-      if (!previous || !previous.line.trim().startsWith("//")) break;
-      comments.unshift(previous.line.replace(/^\s*\/\/!? ?/, ""));
-      cursor = previous.start;
+    const comments: string[] = [];
+    while (index >= 0 && lines[index].trim().startsWith("//")) {
+      comments.unshift(lines[index].replace(/^\s*\/\/!? ?/, ""));
+      index--;
     }
     return comments.join("\n").trim() || undefined;
   }
@@ -378,34 +350,8 @@ const extractPawnMacroSymbols = (
   return symbols;
 };
 
-export type PawnAnalysisPhase =
-  | "tokenize"
-  | "delimiters"
-  | "functions"
-  | "enums"
-  | "macros"
-  | "variables"
-  | "tagInference";
-
-export type PawnAnalysisPerformanceCallback = (
-  phase: PawnAnalysisPhase,
-  durationMs: number
-) => void;
-
-export const analyzePawn = (
-  text: string,
-  onPerformance?: PawnAnalysisPerformanceCallback
-): PawnAnalysis => {
-  let previousPhaseAt = onPerformance ? performance.now() : 0;
-  const recordPhase = (phase: PawnAnalysisPhase) => {
-    if (!onPerformance) return;
-    const now = performance.now();
-    onPerformance(phase, now - previousPhaseAt);
-    previousPhaseAt = now;
-  };
-
+export const analyzePawn = (text: string): PawnAnalysis => {
   const tokens = tokenizePawn(text);
-  recordPhase("tokenize");
   const symbols: PawnSymbol[] = [];
   const functions: FunctionRegion[] = [];
   const pendingInitializers: Array<{ symbol: PawnSymbol; expression: string }> = [];
@@ -463,7 +409,6 @@ export const analyzePawn = (
       matchedBraceStack.push(index);
     }
   });
-  recordPhase("delimiters");
 
   const functionModifierTokenIndexes = new Set<number>();
 
@@ -563,7 +508,6 @@ export const analyzePawn = (
       });
     });
   }
-  recordPhase("functions");
 
   // Register enum names and their members.
   for (let index = 0; index < tokens.length; index++) {
@@ -624,11 +568,9 @@ export const analyzePawn = (
     });
     index = close;
   }
-  recordPhase("enums");
 
   // Register Pawn #define macros, including positional parameters and patterns.
   extractPawnMacroSymbols(text, tokens).forEach((symbol) => addSymbol(symbols, symbol));
-  recordPhase("macros");
 
   // Function regions are discovered in source order. Advance one cursor while
   // scanning declarations instead of filtering and sorting all functions per
@@ -643,10 +585,9 @@ export const analyzePawn = (
     ) {
       functionRegionIndex++;
     }
-    const token = tokens[index];
-    if (token.kind !== "identifier") continue;
-    const keyword = token.value.toLowerCase();
+    const keyword = tokens[index].value.toLowerCase();
     if (keyword !== "new" && keyword !== "static") continue;
+    if (tokens[index].kind !== "identifier") continue;
 
     // "static" can also be a function modifier. Its token index was recorded
     // while function declarations were discovered.
@@ -735,7 +676,6 @@ export const analyzePawn = (
 
     index = statementEnd;
   }
-  recordPhase("variables");
 
   // Index symbols once; inference runs repeatedly but lookups stay O(1) by name.
   const symbolIndex = buildPawnSymbolIndex(symbols);
@@ -799,7 +739,6 @@ export const analyzePawn = (
 
     if (!changed) break;
   }
-  recordPhase("tagInference");
 
   return { text, tokens, symbols };
 };

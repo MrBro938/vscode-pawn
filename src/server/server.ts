@@ -28,7 +28,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 
-import { createTextPositionCursor, positionToIndex, findIdentifierAtCursor } from "./util";
+import { positionToIndex, findIdentifierAtCursor } from "./util";
 import {
   parseFunctions,
   functionTokens,
@@ -364,14 +364,7 @@ const removeDocumentSymbols = (uri: string) => {
 
 const analyzePawnMeasured = (uri: string, text: string): PawnAnalysis => {
   const startedAt = performanceStats.isEnabled ? performance.now() : 0;
-  const analysis = performanceStats.measure("analysis.parse", () =>
-    analyzePawn(
-      text,
-      performanceStats.isEnabled
-        ? (phase, durationMs) => performanceStats.record(`analysis.phase.${phase}`, durationMs)
-        : undefined
-    )
-  );
+  const analysis = performanceStats.measure("analysis.parse", () => analyzePawn(text));
   performanceStats.count("analysis.filesParsed");
   performanceStats.count("analysis.tokens", analysis.tokens.length);
   performanceStats.count("analysis.symbols", analysis.symbols.length);
@@ -987,7 +980,6 @@ connection.languages.semanticTokens.on((params) =>
   const tokenTypes = semanticLegend.tokenTypes;
   const tokenTypeIndex = new Map(tokenTypes.map((type, index) => [type, index]));
   const builder = new SemanticTokensBuilder();
-  const tokenPosition = createTextPositionCursor(analysis.text);
 
   performanceStats.measure("semanticTokens.classifyTokens", () =>
   analysis.tokens.forEach((token, tokenIndex) => {
@@ -1043,7 +1035,7 @@ connection.languages.semanticTokens.on((params) =>
     const typeIndex = tokenTypeIndex.get(tokenType);
     if (typeIndex === undefined) return;
 
-    const position = tokenPosition(token.start, token.end);
+    const position = document.positionAt(token.start);
     builder.push(
       position.line,
       position.character,

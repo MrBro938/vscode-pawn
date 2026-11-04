@@ -37,19 +37,7 @@ const source = [
   "}"
 ].join("\n");
 
-const phaseEvents = [];
-const analysis = analyzePawn(source, (phase, durationMs) => {
-  phaseEvents.push({ phase, durationMs });
-});
-assert.deepEqual(
-  phaseEvents.map(({ phase }) => phase),
-  ["tokenize", "delimiters", "functions", "enums", "macros", "variables", "tagInference"],
-  "analysis should report each major parser phase in order"
-);
-assert.ok(
-  phaseEvents.every(({ durationMs }) => Number.isFinite(durationMs) && durationMs >= 0),
-  "analysis phase durations should be finite and non-negative"
-);
+const analysis = analyzePawn(source);
 const find = (name, kind) =>
   analysis.symbols.find((symbol) => symbol.name === name && symbol.kind === kind);
 
