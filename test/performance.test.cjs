@@ -52,7 +52,7 @@ percentileMonitor.recordFileAnalysis("/workspace/gamemodes/fast.inc", 2048, 400,
 const slowFiles = percentileMonitor.snapshot().slowFiles;
 assert.equal(slowFiles[0].name, "slow.pwn");
 assert.equal(slowFiles[0].tokens, 1000);
-assert.match(formatPerformanceSnapshot("Test", percentileMonitor.snapshot()), /slow\\.pwn/);
+assert.ok(formatPerformanceSnapshot("Test", percentileMonitor.snapshot()).includes("slow.pwn"));
 
 percentileMonitor.reset();
 assert.equal(percentileMonitor.snapshot().slowFiles.length, 0);
