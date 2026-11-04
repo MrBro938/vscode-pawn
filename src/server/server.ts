@@ -52,7 +52,6 @@ import {
   resolveIncludeUris,
   getIncludedFileUris,
   extractPawnIncludes,
-  buildPawnPathIndex,
   normalizePawnPath,
   PawnIncludeMode,
 } from "./includeGraph";
@@ -936,7 +935,7 @@ const resolveIncludeDefinition = (
   const pathStart = line.indexOf(match[2]);
   if (
     position.character < pathStart ||
-    position.character > pathStart + match[1].length
+    position.character > pathStart + match[2].length
   ) {
     return undefined;
   }
