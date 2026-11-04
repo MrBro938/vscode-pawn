@@ -127,7 +127,7 @@ assert.deepEqual(
 const macroCall = "SUM(first, Nested(1, 2), ";
 assert.deepEqual(
   findFunctionIdentifier(macroCall, macroCall.length),
-  { identifier: "SUM", parameterIndex: 1 },
+  { identifier: "SUM", parameterIndex: 2 },
   "macro argument counting should ignore commas in nested calls"
 );
 
