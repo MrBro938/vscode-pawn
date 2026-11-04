@@ -77,7 +77,7 @@ const pawnKeywords = [
   "decl", "default", "defined", "do", "else", "enum", "exit", "false",
   "for", "forward", "goto", "if", "native", "new", "not", "operator",
   "or", "public", "return", "sizeof", "sleep", "state", "static", "stock",
-  "switch", "tagof", "true", "while"
+  "switch", "tagof", "true", "Float", "while"
 ];
 
 /**

@@ -10,6 +10,13 @@ export type PawnSymbolKind =
   | "enumMember"
   | "type";
 
+export interface PawnParameter {
+  name?: string;
+  tag?: string;
+  isArray?: boolean;
+  detail: string;
+}
+
 export interface PawnSymbol {
   name: string;
   kind: PawnSymbolKind;
@@ -18,6 +25,10 @@ export interface PawnSymbol {
   scopeStart: number;
   scopeEnd: number;
   isArray?: boolean;
+  /** Pawn tag annotation. For functions, this is the return tag. */
+  tag?: string;
+  /** Declared parameters, retained for definitions and prototypes alike. */
+  parameters?: PawnParameter[];
   detail?: string;
   /** Pawn preprocessor placeholders in the macro pattern, e.g. ["%1", "%2"]. */
   macroParameters?: string[];
@@ -146,11 +157,24 @@ const splitTopLevel = (
   return result;
 };
 
+const getPawnTagBefore = (
+  tokens: PawnToken[],
+  nameIndex: number
+): string | undefined => {
+  if (
+    isPunctuation(tokens[nameIndex - 1], ":") &&
+    tokens[nameIndex - 2]?.kind === "identifier"
+  ) {
+    return tokens[nameIndex - 2].value;
+  }
+  return undefined;
+};
+
 const findDeclaredName = (
   tokens: PawnToken[],
   start: number,
   end: number
-): { token: PawnToken; isArray: boolean } | undefined => {
+): { token: PawnToken; isArray: boolean; tag?: string } | undefined => {
   let limit = end;
   for (let index = start; index < end; index++) {
     if (isPunctuation(tokens[index], "=")) {
@@ -177,8 +201,9 @@ const findDeclaredName = (
   const name = candidates[candidates.length - 1];
   if (!name) return undefined;
 
+  const nameIndex = tokens.indexOf(name);
   const isArray = isPunctuation(tokens[limit], "[");
-  return { token: name, isArray };
+  return { token: name, isArray, tag: getPawnTagBefore(tokens, nameIndex) };
 };
 
 const getLeadingMacroDocumentation = (
@@ -359,6 +384,25 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     let next = closeParen + 1;
     if (isPunctuation(tokens[next], ":")) next += 2;
 
+    const parameterSegments = splitTopLevel(tokens, index + 2, closeParen, ",");
+    const parsedParameters = parameterSegments.map(([paramStart, paramEnd]) => {
+      const declared = findDeclaredName(tokens, paramStart, paramEnd);
+      return {
+        paramStart,
+        paramEnd,
+        declared,
+        detail: paramStart < paramEnd
+          ? text.slice(tokens[paramStart].start, tokens[paramEnd - 1].end)
+          : "",
+      };
+    }).filter((parameter) => parameter.detail.length > 0);
+    const parameterMetadata: PawnParameter[] = parsedParameters.map((parameter) => ({
+      name: parameter.declared?.token.value,
+      tag: parameter.declared?.tag,
+      isArray: parameter.declared?.isArray,
+      detail: parameter.detail,
+    }));
+
     addSymbol(symbols, {
       name: nameToken.value,
       kind: "function",
@@ -366,11 +410,13 @@ export const analyzePawn = (text: string): PawnAnalysis => {
       end: nameToken.end,
       scopeStart: 0,
       scopeEnd: text.length,
+      tag: getPawnTagBefore(tokens, index),
+      parameters: parameterMetadata,
       detail: text.slice(nameToken.start, tokens[closeParen].end).trim(),
     });
 
-    // Forward/native declarations have no local scope. Only index parameters
-    // when a function body exists.
+    // Forward/native declarations have no local scope, but their parameter
+    // metadata remains attached to the function symbol for Signature Help.
     if (!isPunctuation(tokens[next], "{")) continue;
 
     const closeBrace = bracePairs.get(next);
@@ -387,10 +433,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
       closeToken: closeBrace,
     });
 
-    const parameters = splitTopLevel(tokens, index + 2, closeParen, ",");
-    parameters.forEach(([paramStart, paramEnd]) => {
-      if (paramStart >= paramEnd) return;
-      const declared = findDeclaredName(tokens, paramStart, paramEnd);
+    parsedParameters.forEach(({ paramStart, paramEnd, declared, detail }) => {
       if (!declared) return;
 
       addSymbol(symbols, {
@@ -401,7 +444,8 @@ export const analyzePawn = (text: string): PawnAnalysis => {
         scopeStart,
         scopeEnd,
         isArray: declared.isArray,
-        detail: text.slice(tokens[paramStart].start, tokens[paramEnd - 1].end),
+        tag: declared.tag,
+        detail,
       });
     });
   }
@@ -459,6 +503,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
         scopeStart: 0,
         scopeEnd: text.length,
         isArray: declared.isArray,
+        tag: declared.tag,
         detail: enumName ? enumName.value : "enum",
       });
     });
@@ -551,6 +596,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
         scopeStart,
         scopeEnd,
         isArray: declared.isArray,
+        tag: declared.tag,
         detail: text.slice(tokens[declStart].start, tokens[declEnd - 1].end),
       });
     });

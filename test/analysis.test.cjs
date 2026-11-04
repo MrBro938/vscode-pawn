@@ -44,6 +44,63 @@ assert.ok(find("E_ID", "enumMember"), "enum member should be indexed");
 assert.ok(find("E_PLAYER", "type"), "enum tag should also be registered as a Pawn type");
 assert.equal(find("E_NAME", "enumMember").isArray, true, "enum array member should be marked as an array");
 
+const tagSource = [
+  "enum E_PLAYER {",
+  "    E_PLAYER_ID,",
+  "    Float:E_PLAYER_HEALTH,",
+  "    bool:E_PLAYER_ACTIVE",
+  "}",
+  "new Float:g_PlayerHealth;",
+  "new E_PLAYER:g_Player;",
+  "new bool:g_PlayerReady;",
+  "forward Float:GetPlayerHealth(playerid, Float:bonus, const bool:includeBonus);",
+  "native E_PLAYER:GetPlayerType(playerid);",
+  "stock Float:Calculate(Float:left, const Float:right[]) {",
+  "    new Float:result;",
+  "    return left + right[0];",
+  "}"
+].join("\n");
+const tagAnalysis = analyzePawn(tagSource);
+const findTagSymbol = (name, kind) =>
+  tagAnalysis.symbols.find((symbol) => symbol.name === name && symbol.kind === kind);
+
+assert.equal(findTagSymbol("g_PlayerHealth", "global").tag, "Float",
+  "built-in Float tags should be stored on global variables");
+assert.equal(findTagSymbol("g_Player", "global").tag, "E_PLAYER",
+  "custom enum tags should be stored on variables");
+assert.equal(findTagSymbol("g_PlayerReady", "global").tag, "bool",
+  "bool tags should be stored on variables");
+assert.equal(findTagSymbol("E_PLAYER_HEALTH", "enumMember").tag, "Float",
+  "tagged enum members should retain their own tag");
+assert.equal(findTagSymbol("E_PLAYER_ACTIVE", "enumMember").tag, "bool",
+  "bool-tagged enum members should retain their tag");
+
+const healthFunction = findTagSymbol("GetPlayerHealth", "function");
+assert.equal(healthFunction.tag, "Float",
+  "forward declarations should expose their return tag");
+assert.deepEqual(
+  healthFunction.parameters.map(({ name, tag }) => [name, tag]),
+  [["playerid", undefined], ["bonus", "Float"], ["includeBonus", "bool"]],
+  "forward parameters should retain names and tags even without a function body"
+);
+assert.equal(findTagSymbol("GetPlayerType", "function").tag, "E_PLAYER",
+  "native declarations should expose custom return tags");
+
+const calculateFunction = findTagSymbol("Calculate", "function");
+assert.equal(calculateFunction.tag, "Float",
+  "function definitions should expose their return tag");
+assert.deepEqual(
+  calculateFunction.parameters.map(({ name, tag, isArray }) => [name, tag, !!isArray]),
+  [["left", "Float", false], ["right", "Float", true]],
+  "function parameter metadata should retain tags and array information"
+);
+assert.equal(findTagSymbol("left", "parameter").tag, "Float",
+  "parameter symbols should expose their Pawn tag");
+assert.equal(findTagSymbol("right", "parameter").tag, "Float",
+  "array parameter symbols should expose their Pawn tag");
+assert.equal(findTagSymbol("result", "local").tag, "Float",
+  "local variables should expose their Pawn tag");
+
 const localDeclarations = analysis.symbols.filter(
   (symbol) => symbol.name === "localValue" && symbol.kind === "local"
 );
