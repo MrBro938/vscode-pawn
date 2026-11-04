@@ -959,14 +959,28 @@ const doHover = (
   const currentAnalysis = getAnalysis(document.uri);
 
   if (currentAnalysis && result.identifier) {
+    const currentSymbol = resolvePawnSymbol(
+      currentAnalysis,
+      document.uri,
+      cursorIndex,
+      [currentAnalysis]
+    );
+    if (currentSymbol) {
+      return { contents: [formatPawnSymbolHover(currentSymbol)] };
+    }
+
+    // Only load wider include/parent scopes when the symbol is not declared
+    // in the active file. Ordinary local-variable Hover stays lightweight.
     const workspace = getWorkspaceAnalyses(document.uri);
-    const symbol = resolvePawnSymbol(
+    const includedSymbol = resolvePawnSymbol(
       currentAnalysis,
       document.uri,
       cursorIndex,
       workspace.map((entry) => entry.analysis)
     );
-    if (symbol) return { contents: [formatPawnSymbolHover(symbol)] };
+    if (includedSymbol) {
+      return { contents: [formatPawnSymbolHover(includedSymbol)] };
+    }
   }
 
   const snip = getFunctionInCompilationUnit(document.uri, result.identifier);

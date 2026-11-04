@@ -621,14 +621,18 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     index = statementEnd;
   }
 
-  // Infer variable initializer tags and function return tags together.
-  const inferencePassLimit = Math.max(1, functions.length + pendingInitializers.length + 1);
+  // Index symbols once; inference runs repeatedly but lookups stay O(1) by name.
+  const symbolIndex = buildPawnSymbolIndex(symbols);
+
+  // A small fixed number of passes supports direct and short chained inference
+  // without allowing long dependency chains to turn analysis quadratic.
+  const inferencePassLimit = 3;
   for (let pass = 0; pass < inferencePassLimit; pass++) {
     let changed = false;
 
     pendingInitializers.forEach(({ symbol, expression }) => {
       if (symbol.tag || symbol.inferredTag) return;
-      const inferred = inferPawnExpressionTag(expression, symbols, symbol.start);
+      const inferred = inferPawnExpressionTag(expression, symbols, symbol.start, symbolIndex);
       if (inferred) {
         symbol.inferredTag = inferred;
         changed = true;
@@ -636,21 +640,19 @@ export const analyzePawn = (text: string): PawnAnalysis => {
     });
 
     functions.forEach((region) => {
-      const functionSymbol = symbols.find((symbol) =>
-        symbol.kind === "function" &&
-        symbol.name === region.name &&
-        symbol.start < region.start
+      const functionSymbol = symbolIndex.get(region.name.toLowerCase())?.find((symbol) =>
+        symbol.kind === "function" && symbol.start < region.start
       );
       if (!functionSymbol || functionSymbol.tag || functionSymbol.inferredTag) return;
 
       const returnExpressions: Array<{ expression: string; offset: number }> = [];
-      for (let index = 0; index < tokens.length; index++) {
+      // Scan only this function body rather than rescanning every token for
+      // every function in the file.
+      for (let index = region.openToken + 1; index < region.closeToken; index++) {
         const token = tokens[index];
         if (
           token.kind !== "identifier" ||
-          token.value.toLowerCase() !== "return" ||
-          token.start < region.start ||
-          token.start >= region.end
+          token.value.toLowerCase() !== "return"
         ) continue;
 
         let end = index + 1;
@@ -670,7 +672,7 @@ export const analyzePawn = (text: string): PawnAnalysis => {
 
       if (returnExpressions.length === 0) return;
       const inferred = returnExpressions.map(({ expression, offset }) =>
-        inferPawnExpressionTag(expression, symbols, offset)
+        inferPawnExpressionTag(expression, symbols, offset, symbolIndex)
       );
       const firstTag = inferred[0];
       if (firstTag && inferred.every((tag) => tag === firstTag)) {
@@ -685,14 +687,29 @@ export const analyzePawn = (text: string): PawnAnalysis => {
   return { text, tokens, symbols };
 };
 
+type PawnSymbolIndex = ReadonlyMap<string, readonly PawnSymbol[]>;
+
+const buildPawnSymbolIndex = (symbols: readonly PawnSymbol[]): PawnSymbolIndex => {
+  const index = new Map<string, PawnSymbol[]>();
+  symbols.forEach((symbol) => {
+    const key = symbol.name.toLowerCase();
+    const matches = index.get(key);
+    if (matches) matches.push(symbol);
+    else index.set(key, [symbol]);
+  });
+  return index;
+};
+
 /**
  * Infer tags only when the expression provides a clear answer. This is a
  * lightweight IntelliSense aid, not a replacement for Pawn compiler checks.
+ * Pass a prebuilt symbol index from analyzePawn to avoid rescanning all symbols.
  */
 export const inferPawnExpressionTag = (
   expression: string,
   symbols: readonly PawnSymbol[],
-  offset = Number.MAX_SAFE_INTEGER
+  offset = Number.MAX_SAFE_INTEGER,
+  symbolIndex: PawnSymbolIndex = buildPawnSymbolIndex(symbols)
 ): string | undefined => {
   let source = expression.trim();
   if (!source) return undefined;
@@ -724,16 +741,19 @@ export const inferPawnExpressionTag = (
     if (token.kind === "number" && /[.eE]/.test(token.value)) return "Float";
     if (token.kind === "identifier" && /^(?:true|false)$/i.test(token.value)) return "bool";
     if (token.kind === "identifier") {
-      const symbol = symbols
-        .filter((candidate) =>
-          candidate.name.toLowerCase() === token.value.toLowerCase() &&
-          ["local", "parameter", "global", "enumMember"].includes(candidate.kind) &&
-          candidate.start <= offset &&
-          offset >= candidate.scopeStart &&
-          offset <= candidate.scopeEnd
-        )
-        .sort((left, right) => right.start - left.start)[0];
-      return symbol?.tag || symbol?.inferredTag;
+      const candidates = symbolIndex.get(token.value.toLowerCase()) || [];
+      let visible: PawnSymbol | undefined;
+      for (const candidate of candidates) {
+        if (
+          !["local", "parameter", "global", "enumMember"].includes(candidate.kind) ||
+          candidate.start > offset ||
+          offset < candidate.scopeStart ||
+          offset > candidate.scopeEnd ||
+          (visible && candidate.start <= visible.start)
+        ) continue;
+        visible = candidate;
+      }
+      return visible?.tag || visible?.inferredTag;
     }
     return undefined;
   }
@@ -747,9 +767,8 @@ export const inferPawnExpressionTag = (
   if (tokens[0].kind === "identifier" && isPunctuation(tokens[1], "(")) {
     const close = findMatching(tokens, 1, "(", ")");
     if (close === tokens.length - 1) {
-      const callable = symbols.find((candidate) =>
-        (candidate.kind === "function" || candidate.kind === "macro") &&
-        candidate.name.toLowerCase() === tokens[0].value.toLowerCase()
+      const callable = (symbolIndex.get(tokens[0].value.toLowerCase()) || []).find((candidate) =>
+        candidate.kind === "function" || candidate.kind === "macro"
       );
       if (callable) return callable.tag || callable.inferredTag;
     }
@@ -757,15 +776,18 @@ export const inferPawnExpressionTag = (
 
   // Array element access preserves the array's tag.
   if (tokens[0].kind === "identifier" && isPunctuation(tokens[1], "[")) {
-    const array = symbols
-      .filter((candidate) =>
-        candidate.name.toLowerCase() === tokens[0].value.toLowerCase() &&
-        ["local", "parameter", "global"].includes(candidate.kind) &&
-        candidate.start <= offset &&
-        offset >= candidate.scopeStart &&
-        offset <= candidate.scopeEnd
-      )
-      .sort((left, right) => right.start - left.start)[0];
+    const candidates = symbolIndex.get(tokens[0].value.toLowerCase()) || [];
+    let array: PawnSymbol | undefined;
+    for (const candidate of candidates) {
+      if (
+        !["local", "parameter", "global"].includes(candidate.kind) ||
+        candidate.start > offset ||
+        offset < candidate.scopeStart ||
+        offset > candidate.scopeEnd ||
+        (array && candidate.start <= array.start)
+      ) continue;
+      array = candidate;
+    }
     if (array) return array.tag || array.inferredTag;
   }
 
@@ -788,10 +810,11 @@ export const inferPawnExpressionTag = (
   const referencedNames = new Set(tokens
     .filter((token) => token.kind === "identifier")
     .map((token) => token.value.toLowerCase()));
-  if (symbols.some((symbol) =>
-    referencedNames.has(symbol.name.toLowerCase()) &&
-    (symbol.tag || symbol.inferredTag) === "Float"
-  )) return "Float";
+  for (const name of referencedNames) {
+    if ((symbolIndex.get(name) || []).some((symbol) =>
+      (symbol.tag || symbol.inferredTag) === "Float"
+    )) return "Float";
+  }
 
   return undefined;
 };
