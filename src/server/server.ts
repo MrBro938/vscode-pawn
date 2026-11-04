@@ -60,6 +60,7 @@ import {
   analyzePawn,
   getBoundOccurrences,
   PawnAnalysis,
+  PawnAnalysisProfiler,
   PawnSymbol,
   resolvePawnSymbol,
 } from "./analysis";
@@ -522,9 +523,22 @@ const analyzePawnMeasured = (uri: string, text: string): PawnAnalysis => {
       "analysis.tokenize",
       () => tokenizePawn(text)
     );
+    const profiler: PawnAnalysisProfiler | undefined = performanceStats.isEnabled
+      ? {
+          start: () => performance.now(),
+          end: (name, startedAt) => performanceStats.record(
+            `analysis.symbolBuild.${name}`,
+            performance.now() - startedAt
+          ),
+          count: (name, amount = 1) => performanceStats.count(
+            `analysis.symbolBuild.${name}`,
+            amount
+          ),
+        }
+      : undefined;
     return performanceStats.measure(
       "analysis.symbolBuild",
-      () => analyzePawn(text, tokens)
+      () => analyzePawn(text, tokens, profiler)
     );
   });
   performanceStats.count("analysis.filesParsed");

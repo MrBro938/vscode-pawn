@@ -48,6 +48,12 @@ export interface PawnAnalysis {
   symbols: PawnSymbol[];
 }
 
+export interface PawnAnalysisProfiler {
+  start(): number;
+  end(name: string, startedAt: number): void;
+  count(name: string, amount?: number): void;
+}
+
 interface FunctionRegion {
   name: string;
   start: number;
@@ -352,10 +358,15 @@ const extractPawnMacroSymbols = (
 
 export const analyzePawn = (
   text: string,
-  pretokenizedTokens?: PawnToken[]
+  pretokenizedTokens?: PawnToken[],
+  profiler?: PawnAnalysisProfiler
 ): PawnAnalysis => {
   const tokens = pretokenizedTokens || tokenizePawn(text);
   const symbols: PawnSymbol[] = [];
+  const finishPhase = (name: string, startedAt: number | undefined) => {
+    if (startedAt !== undefined) profiler?.end(name, startedAt);
+  };
+  profiler?.count("tokens", tokens.length);
   const functions: FunctionRegion[] = [];
   const pendingInitializers: Array<{
     symbol: PawnSymbol;
@@ -368,6 +379,7 @@ export const analyzePawn = (
   const parenthesisPairs = new Map<number, number>();
   const parenthesisStack: number[] = [];
   let braceDepth = 0;
+  const structurePassStarted = profiler?.start();
 
   tokens.forEach((token, index) => {
     if (isPunctuation(token, "}")) braceDepth = Math.max(0, braceDepth - 1);
@@ -387,10 +399,12 @@ export const analyzePawn = (
       if (open !== undefined) bracePairs.set(open, index);
     }
   });
+  finishPhase("structurePass", structurePassStarted);
 
   // Precompute the innermost matched block for each token in one linear pass.
   // Variable declarations can then resolve lexical scopes in O(1), instead of
   // filtering and sorting every brace pair for every local variable.
+  const scopePassStarted = profiler?.start();
   const closeBraceToOpen = new Map<number, number>();
   bracePairs.forEach((close, open) => closeBraceToOpen.set(close, open));
   const matchedBraceStack: number[] = [];
@@ -416,8 +430,10 @@ export const analyzePawn = (
       matchedBraceStack.push(index);
     }
   });
+  finishPhase("scopePass", scopePassStarted);
 
   const functionModifierTokenIndexes = new Set<number>();
+  const functionPassStarted = profiler?.start();
 
   // Pawn functions are declared at file scope. This prevents ordinary calls
   // inside function bodies from being mistaken for declarations.
@@ -515,8 +531,11 @@ export const analyzePawn = (
       });
     });
   }
+  finishPhase("functionPass", functionPassStarted);
+  profiler?.count("functionRegions", functions.length);
 
   // Register enum names and their members.
+  const enumPassStarted = profiler?.start();
   for (let index = 0; index < tokens.length; index++) {
     if (tokens[index].value.toLowerCase() !== "enum") continue;
 
@@ -575,14 +594,20 @@ export const analyzePawn = (
     });
     index = close;
   }
+  finishPhase("enumPass", enumPassStarted);
 
   // Register Pawn #define macros, including positional parameters and patterns.
-  extractPawnMacroSymbols(text, tokens).forEach((symbol) => addSymbol(symbols, symbol));
+  const macroPassStarted = profiler?.start();
+  const macroSymbols = extractPawnMacroSymbols(text, tokens);
+  macroSymbols.forEach((symbol) => addSymbol(symbols, symbol));
+  finishPhase("macroPass", macroPassStarted);
+  profiler?.count("macroDeclarations", macroSymbols.length);
 
   // Function regions are discovered in source order. Advance one cursor while
   // scanning declarations instead of filtering and sorting all functions per
   // variable declaration.
   let functionRegionIndex = 0;
+  const variablePassStarted = profiler?.start();
 
   // Discover new/static variable declarations and distinguish globals from locals.
   for (let index = 0; index < tokens.length; index++) {
@@ -685,14 +710,25 @@ export const analyzePawn = (
 
     index = statementEnd;
   }
+  finishPhase("variablePass", variablePassStarted);
+  profiler?.count(
+    "variableDeclarations",
+    symbols.filter((symbol) => symbol.kind === "global" || symbol.kind === "local").length
+  );
+  profiler?.count("pendingInitializers", pendingInitializers.length);
 
   // Index symbols once; inference runs repeatedly but lookups stay O(1) by name.
+  const symbolIndexStarted = profiler?.start();
   const symbolIndex = buildPawnSymbolIndex(symbols);
+  finishPhase("symbolIndex", symbolIndexStarted);
+  const inferencePassStarted = profiler?.start();
 
   // A small fixed number of passes supports direct and short chained inference
   // without allowing long dependency chains to turn analysis quadratic.
   const inferencePassLimit = 3;
+  let inferencePasses = 0;
   for (let pass = 0; pass < inferencePassLimit; pass++) {
+    inferencePasses++;
     let changed = false;
 
     pendingInitializers.forEach(({ symbol, startTokenIndex, endTokenIndex }) => {
@@ -769,6 +805,9 @@ export const analyzePawn = (
 
     if (!changed) break;
   }
+  finishPhase("tagInference", inferencePassStarted);
+  profiler?.count("inferencePasses", inferencePasses);
+  profiler?.count("symbols", symbols.length);
 
   return { text, tokens, symbols };
 };

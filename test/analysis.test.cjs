@@ -481,3 +481,29 @@ assert.equal(
   "Float",
   "public expression inference must preserve comment and parenthesis handling"
 );
+
+
+const profiledAnalysisPhases = new Map();
+const profiledAnalysis = analyzePawn(
+  "new TestFunction() { new value = 1; return value; }",
+  undefined,
+  {
+    start: () => 10,
+    end: (name, startedAt) => profiledAnalysisPhases.set(name, startedAt),
+    count: (name, amount = 1) =>
+      profiledAnalysisPhases.set(name, (profiledAnalysisPhases.get(name) || 0) + amount)
+  }
+);
+for (const phase of [
+  "structurePass", "scopePass", "functionPass", "enumPass",
+  "macroPass", "variablePass", "symbolIndex", "tagInference"
+]) {
+  assert.ok(
+    profiledAnalysisPhases.has(phase),
+    `analysis profiling should report the ${phase} stage`
+  );
+}
+assert.ok(profiledAnalysisPhases.get("tokens") > 0,
+  "analysis profiling should count input tokens");
+assert.ok(profiledAnalysisPhases.get("symbols") >= profiledAnalysis.symbols.length,
+  "analysis profiling should report the complete symbol count");
