@@ -63,17 +63,18 @@ export const extractPawnIncludes = (text: string): PawnIncludeDirective[] => {
 
     if (insideBlockComment) return;
 
-    const match = /^#\s*include\s*([<"])([^">]+)([>"])/i.exec(line.slice(index));
+    const match = /^#\s*include\s*(?:([<"])([^">]+)([>"])|([^\s]+))/i.exec(line.slice(index));
     if (!match) return;
     if ((match[1] === "<" && match[3] !== ">") ||
         (match[1] === '"' && match[3] !== '"')) return;
 
-    const includePath = match[2].trim();
+    const includePath = (match[2] || match[4] || "").trim();
     if (!includePath) return;
 
     includes.push({
       path: includePath,
-      mode: match[1] === '"' ? "quoted" : "system",
+      // Unquoted and double-quoted includes are local includes in Pawn.
+      mode: match[1] === "<" ? "system" : "quoted",
     });
   });
 
@@ -147,9 +148,11 @@ export const resolveIncludeUris = (
       if (match) return [match];
     }
 
-    // Compatibility fallback for workspaces without a usable pawn.json,
-    // pawn.cfg or compiler include path. Keep ambiguity visible instead of
-    // silently selecting an arbitrary same-suffix file.
+    // Compatibility fallback is only used when no compiler include paths
+    // were discovered. With a configured search path, returning a same-suffix
+    // file from an unrelated directory would disagree with pawncc.
+    if (includeDirectories.length > 0) return [];
+
     const matches = new Set<string>();
     const localCandidatePaths = new Set(
       variants.map((variant) =>
