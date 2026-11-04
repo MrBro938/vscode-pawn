@@ -1,6 +1,7 @@
 import {
   CompletionItem,
   CompletionItemKind,
+  InsertTextFormat,
 } from "vscode-languageserver";
 import { PawnAnalysis, PawnSymbol, PawnSymbolKind } from "./analysis";
 
@@ -22,15 +23,54 @@ const completionKind = (kind: PawnSymbolKind): CompletionItemKind => {
   }
 };
 
-const toCompletionItem = (symbol: PawnSymbol): CompletionItem => ({
-  label: symbol.name,
-  kind: completionKind(symbol.kind),
-  detail: symbol.detail,
-  filterText: symbol.name,
-  // Keep insertion predictable; Signature Help provides the argument details
-  // after the user types the opening parenthesis.
-  insertText: symbol.name,
-});
+const formatMacroPattern = (symbol: PawnSymbol): string =>
+  (symbol.macroPattern || "").replace(/,/g, ", ");
+
+const buildMacroSnippet = (symbol: PawnSymbol): string => {
+  const positions = new Map<string, number>();
+  let nextPosition = 1;
+  const pattern = (symbol.macroPattern || "").replace(/%[0-9]/g, (placeholder) => {
+    let position = positions.get(placeholder);
+    if (position === undefined) {
+      position = nextPosition++;
+      positions.set(placeholder, position);
+    }
+    return "$" + position;
+  });
+  return symbol.name + pattern + (symbol.macroParameters?.length ? "$0" : "");
+};
+
+export const getPawnMacroSignature = (
+  symbol: PawnSymbol
+): {
+  label: string;
+  parameters: Array<{ label: string }>;
+  documentation?: string;
+} | undefined => {
+  if (symbol.kind !== "macro" || !symbol.macroParameters?.length) return undefined;
+
+  return {
+    label: symbol.name + formatMacroPattern(symbol),
+    parameters: symbol.macroParameters.map((label) => ({ label })),
+    documentation: symbol.documentation,
+  };
+};
+
+const toCompletionItem = (symbol: PawnSymbol): CompletionItem => {
+  const macroSignature = getPawnMacroSignature(symbol);
+  const isParameterizedMacro = !!macroSignature;
+  return {
+    label: macroSignature?.label || symbol.name,
+    kind: isParameterizedMacro
+      ? CompletionItemKind.Function
+      : completionKind(symbol.kind),
+    detail: symbol.macroReplacement || symbol.detail,
+    documentation: symbol.documentation,
+    filterText: symbol.name,
+    insertText: isParameterizedMacro ? buildMacroSnippet(symbol) : symbol.name,
+    insertTextFormat: isParameterizedMacro ? InsertTextFormat.Snippet : undefined,
+  };
+};
 
 const pawnKeywords = [
   "and", "assert", "bool", "break", "case", "char", "const", "continue",
