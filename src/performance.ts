@@ -139,7 +139,7 @@ class P2Quantile {
 
   value(): number {
     if (this.initial.length === 0) return 0;
-    if (this.initial.length < 5) {
+    if (this.initial.length < 5 || this.positions[4] === 5) {
       const sorted = [...this.initial].sort((left, right) => left - right);
       return sorted[Math.max(0, Math.ceil(sorted.length * this.quantile) - 1)];
     }

@@ -40,6 +40,17 @@ for (let index = 0; index < 744; index++) {
 for (let index = 0; index < 256; index++) {
   percentileMonitor.record("distribution", 1);
 }
+const smallSampleMonitor = new PerformanceMonitor();
+smallSampleMonitor.setEnabled(true);
+[1, 2, 3, 4, 100].forEach((value) =>
+  smallSampleMonitor.record("small-sample", value)
+);
+assert.equal(
+  smallSampleMonitor.snapshot().timings["small-sample"].p95Ms,
+  100,
+  "P95 with exactly five observations should use the nearest-rank maximum, not the median"
+);
+
 const distribution = percentileMonitor.snapshot().timings.distribution;
 assert.equal(distribution.count, 1000);
 assert.ok(
