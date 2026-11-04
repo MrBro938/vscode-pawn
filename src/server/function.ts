@@ -7,7 +7,7 @@ import {
 } from "vscode-languageserver";
 import { TextDocument } from "vscode-languageserver-textdocument";
 
-import { isAlphaNum, isDigit, isWhitespace, reverse } from "./util";
+import { tokenizePawn } from "./symbols";
 
 export interface PawnFunction {
   uri: string;
@@ -103,47 +103,73 @@ export const findFunctionIdentifier = (
   content: string,
   cursorIndex: number
 ): FindFunctionIdentifierResult => {
-  let index = cursorIndex - 1;
+  const allTokens = tokenizePawn(content);
+  const containingToken = allTokens.find((token) =>
+    cursorIndex > token.start && cursorIndex < token.end
+  );
+
+  // A cursor inside a comment or string is not part of a function argument.
+  if (containingToken?.kind === "comment" || containingToken?.kind === "string") {
+    return { identifier: "", parameterIndex: 0 };
+  }
+
+  const tokens = allTokens.filter((token) =>
+    token.start < cursorIndex &&
+    token.kind !== "comment" &&
+    token.kind !== "string"
+  );
+
   let parenthesisDepth = 0;
-  let identifier = "";
+  let squareDepth = 0;
+  let curlyDepth = 0;
   let parameterIndex = 0;
 
-  while (index >= 0) {
-    if (content[index] === ";") {
-      return { identifier: "", parameterIndex: 0 };
-    }
-    if (content[index] === "," && parenthesisDepth === 0) {
-      ++parameterIndex;
-    }
-    if (content[index] === ")") {
-      ++parenthesisDepth;
-      --index;
-      continue;
-    }
-    if (content[index] === "(") {
-      if (parenthesisDepth > 0) {
-        --parenthesisDepth;
-        --index;
-        continue;
-      }
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const token = tokens[index];
+    if (token.kind !== "punctuation") continue;
 
-      while (isWhitespace(content[--index])) {}
-      while (index >= 0 && isAlphaNum(content[index])) {
-        identifier += content[index];
-        --index;
-      }
-      let identIndex = identifier.length;
-      while (--identIndex >= 0 && isDigit(identifier[identIndex])) {}
-      if (identIndex !== identifier.length - 1) {
-        identifier = identifier.substring(0, identIndex + 1);
-      }
-      return {
-        identifier: reverse(identifier),
-        parameterIndex: parameterIndex,
-      };
-    }
+    switch (token.value) {
+      case ")":
+        parenthesisDepth++;
+        break;
+      case "(":
+        if (parenthesisDepth > 0) {
+          parenthesisDepth--;
+          break;
+        }
 
-    --index;
+        // Only an identifier followed by an opening parenthesis is a call.
+        const callee = tokens[index - 1];
+        if (callee?.kind !== "identifier") {
+          return { identifier: "", parameterIndex: 0 };
+        }
+        return {
+          identifier: callee.value,
+          parameterIndex,
+        };
+      case "]":
+        squareDepth++;
+        break;
+      case "[":
+        squareDepth = Math.max(0, squareDepth - 1);
+        break;
+      case "}":
+        curlyDepth++;
+        break;
+      case "{":
+        curlyDepth = Math.max(0, curlyDepth - 1);
+        break;
+      case ",":
+        if (parenthesisDepth === 0 && squareDepth === 0 && curlyDepth === 0) {
+          parameterIndex++;
+        }
+        break;
+      case ";":
+        if (parenthesisDepth === 0 && squareDepth === 0 && curlyDepth === 0) {
+          return { identifier: "", parameterIndex: 0 };
+        }
+        break;
+    }
   }
 
   return { identifier: "", parameterIndex: 0 };
