@@ -218,34 +218,63 @@ const getLeadingMacroDocumentation = (
   text: string,
   lineStart: number
 ): string | undefined => {
-  const lines = text.slice(0, lineStart).split(/\r?\n/);
-  let index = lines.length - 1;
+  // Inspect only preceding comment lines. Splitting the complete file prefix
+  // for every #define caused quadratic work in macro-heavy Pawn files.
+  const previousLine = (end: number): { start: number; end: number } | undefined => {
+    if (end <= 0) return undefined;
+    let lineEnd = end;
+    if (text.charCodeAt(lineEnd - 1) === 10) lineEnd--;
+    if (lineEnd > 0 && text.charCodeAt(lineEnd - 1) === 13) lineEnd--;
+    return {
+      start: text.lastIndexOf("\n", lineEnd - 1) + 1,
+      end: lineEnd,
+    };
+  };
+  const trimmedBounds = (line: { start: number; end: number }) => {
+    let start = line.start;
+    let end = line.end;
+    while (start < end && /\s/.test(text[start])) start++;
+    while (end > start && /\s/.test(text[end - 1])) end--;
+    return { start, end };
+  };
 
-  while (index >= 0 && !lines[index].trim()) index--;
-  if (index < 0) return undefined;
+  let line = previousLine(lineStart);
+  let trimmed = line ? trimmedBounds(line) : undefined;
+  while (line && trimmed && trimmed.start === trimmed.end) {
+    line = previousLine(line.start);
+    trimmed = line ? trimmedBounds(line) : undefined;
+  }
+  if (!line || !trimmed) return undefined;
 
-  const lastLine = lines[index].trim();
+  const lastLine = text.slice(trimmed.start, trimmed.end);
   if (lastLine.endsWith("*/")) {
-    const end = index;
-    while (index >= 0 && !lines[index].includes("/*")) index--;
-    if (index < 0) return undefined;
-    return lines.slice(index, end + 1)
-      .join("\n")
+    const closingLineEnd = line.end;
+    let openingLine = line;
+    while (
+      openingLine &&
+      !text.slice(openingLine.start, openingLine.end).includes("/*")
+    ) {
+      openingLine = previousLine(openingLine.start);
+    }
+    if (!openingLine) return undefined;
+
+    return text.slice(openingLine.start, closingLineEnd)
       .replace(/^\s*\/\*\*?/, "")
       .replace(/\*\/\s*$/, "")
       .split("\n")
-      .map((line) => line.replace(/^\s*\* ?/, "").trimEnd())
+      .map((commentLine) => commentLine.replace(/^\s*\* ?/, "").trimEnd())
       .join("\n")
       .trim() || undefined;
   }
 
   if (lastLine.startsWith("//")) {
     const comments: string[] = [];
-    while (index >= 0 && lines[index].trim().startsWith("//")) {
-      comments.unshift(lines[index].replace(/^\s*\/\/!? ?/, ""));
-      index--;
+    while (line && trimmed && text.slice(trimmed.start, trimmed.end).startsWith("//")) {
+      comments.push(text.slice(line.start, line.end).replace(/^\s*\/\/!? ?/, ""));
+      line = previousLine(line.start);
+      trimmed = line ? trimmedBounds(line) : undefined;
     }
-    return comments.join("\n").trim() || undefined;
+    return comments.reverse().join("\n").trim() || undefined;
   }
 
   return undefined;

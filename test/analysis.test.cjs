@@ -265,6 +265,35 @@ assert.equal(
 assert.ok(findMacro("MAX_PATH"), "simple constant-style defines should remain supported");
 assert.ok(!findMacro("HIDDEN_MACRO"), "defines inside block comments must not be indexed");
 
+const lineDocumentedMacro = analyzePawn([
+  "// First documentation line.",
+  "// Second documentation line.",
+  "",
+  "#define DOCUMENTED_LINE 1"
+].join("\n")).symbols.find((symbol) => symbol.kind === "macro");
+assert.equal(
+  lineDocumentedMacro?.documentation,
+  "First documentation line.\nSecond documentation line.",
+  "consecutive line comments should remain attached after blank lines"
+);
+
+// Many documented macros used to repeatedly split the entire preceding file,
+// producing quadratic work as the file grew.
+const macroDocStressCount = 1024;
+const macroDocStressSource = Array.from(
+  { length: macroDocStressCount },
+  (_, index) => `/** Documentation ${index}. */\n#define DOC_${index} ${index}`
+).join("\n");
+const macroDocStressAnalysis = analyzePawn(macroDocStressSource);
+const lastDocumentedMacro = macroDocStressAnalysis.symbols.find(
+  (symbol) => symbol.kind === "macro" && symbol.name === `DOC_${macroDocStressCount - 1}`
+);
+assert.equal(
+  lastDocumentedMacro?.documentation,
+  `Documentation ${macroDocStressCount - 1}.`,
+  "documentation lookup should stay correct for macros near the end of large files"
+);
+
 // Exercise declaration parsing at a scale large enough to catch accidental
 // full-token-array rescans for every declaration.
 const stressDeclarationCount = 4096;
