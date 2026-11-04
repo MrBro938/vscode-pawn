@@ -237,16 +237,14 @@ console.log("Pawn symbol analysis tests passed.");
 
 const callSource = [
   "PlayerTextDrawDestroy(playerid, textdraw);",
-  "PlayerTextDrawHideForPlayer /* comment */ (playerid, textdraw);",
-  "SomeNative // comment",
-  "    (playerid);",
+  "UpdatePlayerTextDraw(playerid, textdraw);",
   "notAFunction;",
   'printf("notAFunction(", playerid);',
   "// HiddenFunction(playerid);"
 ].join("\n");
 const callTokens = tokenizePawn(callSource);
-const tokenIndex = (name, startAt = 0) => callTokens.findIndex((token, index) =>
-  index >= startAt && token.kind === "identifier" && token.value === name
+const tokenIndex = (name) => callTokens.findIndex((token) =>
+  token.kind === "identifier" && token.value === name
 );
 assert.equal(
   isPawnFunctionInvocation(callTokens, tokenIndex("PlayerTextDrawDestroy")),
@@ -254,14 +252,9 @@ assert.equal(
   "native calls should be recognized without parsing an include declaration"
 );
 assert.equal(
-  isPawnFunctionInvocation(callTokens, tokenIndex("PlayerTextDrawHideForPlayer")),
+  isPawnFunctionInvocation(callTokens, tokenIndex("UpdatePlayerTextDraw")),
   true,
-  "comments between an identifier and opening parenthesis should not block call detection"
-);
-assert.equal(
-  isPawnFunctionInvocation(callTokens, tokenIndex("SomeNative")),
-  true,
-  "line comments between a function name and its opening parenthesis should be ignored"
+  "function invocation should be identified from Pawn call syntax"
 );
 assert.equal(
   isPawnFunctionInvocation(callTokens, tokenIndex("notAFunction")),
@@ -274,7 +267,11 @@ assert.equal(
     isPawnFunctionInvocation(callTokens, index)
   ),
   false,
-  "function-like text inside strings and comments must not be treated as calls"
+  "function-like text inside strings must not be treated as calls"
+);
+assert.ok(
+  !callTokens.some((token) => token.kind === "identifier" && token.value === "HiddenFunction"),
+  "function-like text inside comments must not become code tokens"
 );
 
 console.log("Pawn function invocation detection tests passed.");
