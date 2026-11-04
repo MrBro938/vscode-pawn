@@ -788,9 +788,10 @@ const getCompletionSources = (uri: string): CompletionSourcesSnapshot => {
             const previous = snapshot.sources[sourceIndex];
             const text = getDocumentText(staleUri);
             const cachedAnalysis = analysisCache.get(staleUri);
-            let analysis = cachedAnalysis?.text === text
-              ? cachedAnalysis.analysis
-              : undefined;
+            let analysis: PawnAnalysis | undefined;
+            if (cachedAnalysis && cachedAnalysis.text === text) {
+              analysis = cachedAnalysis.analysis;
+            }
 
             if (!analysis) {
               if (text === undefined) return;
