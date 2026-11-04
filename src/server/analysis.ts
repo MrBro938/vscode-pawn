@@ -661,9 +661,7 @@ export const analyzePawn = (
           break;
         }
       }
-      const initializer = equalsIndex >= 0 && equalsIndex + 1 < declEnd
-        ? text.slice(tokens[equalsIndex + 1].start, tokens[declEnd - 1].end)
-        : "";
+      const hasInitializer = equalsIndex >= 0 && equalsIndex + 1 < declEnd;
       const variableSymbol: PawnSymbol = {
         name: declared.token.value,
         kind: functionRegion ? "local" : "global",
@@ -676,7 +674,7 @@ export const analyzePawn = (
         detail: text.slice(tokens[declStart].start, tokens[declEnd - 1].end),
       };
       addSymbol(symbols, variableSymbol);
-      if (!declared.tag && initializer) {
+      if (!declared.tag && hasInitializer) {
         pendingInitializers.push({
           symbol: variableSymbol,
           startTokenIndex: equalsIndex + 1,
