@@ -35,7 +35,7 @@ import {
   functionTokensByUri,
   findFunctionIdentifier,
 } from "./function";
-import { parseWords, wordTokens } from "./words";
+import { buildPawnCompletionItems, PawnCompletionSource } from "./completion";
 import { definitionTokens, parseDefinitions } from "./definition";
 import { tokenizePawn } from "./symbols";
 import {
@@ -63,7 +63,6 @@ const documents = new TextDocuments(TextDocument);
 
 const PARSE_DEBOUNCE_MS = 150;
 const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
-const completionCache = new Map<string, CompletionItem[]>();
 const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>();
 const indexedSymbolTexts = new Map<string, string>();
 let semanticTokensRefreshSupported = false;
@@ -113,7 +112,6 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
       indexedSymbolTexts.delete(uri);
       analysisCache.delete(uri);
       removeDocumentSymbols(uri);
-      completionCache.clear();
     }
 
     indexedPawnFiles.set(uri, filePath);
@@ -178,7 +176,6 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
   indexedSymbolTexts.delete(uri);
   analysisCache.delete(uri);
   removeDocumentSymbols(uri);
-  completionCache.clear();
   const parts = filePath.split(path.sep);
 
   for (let index = 0; index < parts.length; index++) {
@@ -288,7 +285,6 @@ const reloadConfiguredIncludes = () => {
   });
 
   rebuildIncludeGraph();
-  completionCache.clear();
 
   // Let the extension host watch external dependency folders without having
   // to duplicate pawn.json / pawn.cfg parsing on the client side.
@@ -332,16 +328,14 @@ const removeDocumentSymbols = (uri: string) => {
     if (value.uri === uri) functionTokens.delete(key);
   });
   functionTokensByUri.delete(uri);
-  wordTokens.delete(uri);
   definitionTokens.delete(uri);
 };
 
-const collectSymbols = (textDocument: TextDocument, includeWords = true) => {
+const collectSymbols = (textDocument: TextDocument) => {
   const text = textDocument.getText();
   removeDocumentSymbols(textDocument.uri);
   parseDefinitions(textDocument);
   parseFunctions(textDocument);
-  if (includeWords) parseWords(textDocument);
   const cachedAnalysis = analysisCache.get(textDocument.uri);
   analysisCache.set(textDocument.uri, {
     text,
@@ -350,7 +344,6 @@ const collectSymbols = (textDocument: TextDocument, includeWords = true) => {
       : analyzePawn(text),
   });
   indexedSymbolTexts.set(textDocument.uri, text);
-  completionCache.clear();
 };
 
 const ensureSymbolsIndexed = (uri: string) => {
@@ -359,7 +352,7 @@ const ensureSymbolsIndexed = (uri: string) => {
 
   const document = documents.get(uri) ||
     TextDocument.create(uri, "pawn", 1, text);
-  collectSymbols(document, documents.get(uri) !== undefined);
+  collectSymbols(document);
 };
 
 const scheduleCollectSymbols = (
@@ -484,7 +477,6 @@ connection.onNotification(
         }
       }
 
-      completionCache.clear();
       if (semanticTokensRefreshSupported) {
         void connection.languages.semanticTokens.refresh();
       }
@@ -596,48 +588,34 @@ connection.onDocumentSymbol((params) => {
   return document ? getDocumentSymbols(document) : [];
 });
 
-const buildCompletionItems = (uri: string): CompletionItem[] => {
-  const cached = completionCache.get(uri);
-  if (cached) return cached;
+const buildCompletionItems = (uri: string, offset: number): CompletionItem[] => {
+  const visibleUris = getIncludedFileUris(uri, includeGraph);
+  const sources: PawnCompletionSource[] = [];
 
-  const items: CompletionItem[] = [];
-  const seen = new Set<string>();
-
-  const add = (item: CompletionItem) => {
-    const key = item.label;
-    if (seen.has(key)) return;
-    seen.add(key);
-    items.push(item);
-  };
-
-  const visibleUris = getCompilationUnitUris(uri, includeGraph);
   visibleUris.forEach((visibleUri) => {
     ensureSymbolsIndexed(visibleUri);
-    functionTokensByUri.get(visibleUri)?.forEach((res) => add(res.completion));
-    definitionTokens.get(visibleUri)?.forEach((res) => add(res.completion));
+    const analysis = getAnalysis(visibleUri);
+    if (analysis) sources.push({ uri: visibleUri, analysis });
   });
 
-  const words = wordTokens.get(uri);
-  if (words) words.forEach(add);
-
-  completionCache.set(uri, items);
-  return items;
+  return buildPawnCompletionItems(uri, offset, sources);
 };
 
 connection.onCompletion((params: CompletionParams): CompletionList => {
-  const items = buildCompletionItems(params.textDocument.uri);
   const document = documents.get(params.textDocument.uri);
-
-  if (!document) return { isIncomplete: false, items };
+  if (!document) return { isIncomplete: false, items: [] };
 
   const offset = document.offsetAt(params.position);
-  const prefixMatch = /[A-Za-z_][A-Za-z0-9_]*$/.exec(
+  const items = buildCompletionItems(params.textDocument.uri, offset);
+  const prefixMatch = /[A-Za-z_@][A-Za-z0-9_@]*$/.exec(
     document.getText().slice(0, offset)
   );
   const prefix = prefixMatch ? prefixMatch[0].toLowerCase() : "";
 
   const filteredItems = prefix
-    ? items.filter((item) => item.label.toLowerCase().startsWith(prefix))
+    ? items.filter((item) =>
+        String(item.filterText || item.label).toLowerCase().startsWith(prefix)
+      )
     : items;
 
   return { isIncomplete: false, items: filteredItems };
@@ -929,10 +907,14 @@ const getFunctionInCompilationUnit = (
   uri: string,
   identifier: string
 ) => {
-  const visibleUris = getCompilationUnitUris(uri, includeGraph);
+  const visibleUris = getIncludedFileUris(uri, includeGraph);
   for (const visibleUri of visibleUris) {
     ensureSymbolsIndexed(visibleUri);
-    const found = functionTokensByUri.get(visibleUri)?.get(identifier);
+    const functions = functionTokensByUri.get(visibleUri);
+    if (!functions) continue;
+    const found = Array.from(functions.entries()).find(
+      ([name]) => name.toLowerCase() === identifier.toLowerCase()
+    )?.[1];
     if (found) return found;
   }
   return undefined;
@@ -988,6 +970,80 @@ connection.onSignatureHelp((params: SignatureHelpParams):
   return doSignHelp(doc, params.position);
 });
 
+const findFunctionSymbolInIncludeClosure = (
+  uri: string,
+  identifier: string
+): { analysis: PawnAnalysis; symbol: PawnSymbol } | undefined => {
+  const visibleUris = getIncludedFileUris(uri, includeGraph);
+  for (const visibleUri of visibleUris) {
+    ensureSymbolsIndexed(visibleUri);
+    const analysis = getAnalysis(visibleUri);
+    if (!analysis) continue;
+    const symbol = analysis.symbols.find((candidate) =>
+      candidate.kind === "function" &&
+      candidate.name.toLowerCase() === identifier.toLowerCase()
+    );
+    if (symbol) return { analysis, symbol };
+  }
+  return undefined;
+};
+
+const getFunctionSignatureParameters = (
+  analysis: PawnAnalysis,
+  symbol: PawnSymbol
+): Array<{ label: string }> => {
+  const nameIndex = analysis.tokens.findIndex((token) =>
+    token.kind === "identifier" && token.start === symbol.start
+  );
+  if (nameIndex < 0 || analysis.tokens[nameIndex + 1]?.value !== "(") return [];
+
+  const parameters: Array<{ label: string }> = [];
+  let segmentStart = nameIndex + 2;
+  let roundDepth = 0;
+  let squareDepth = 0;
+  let curlyDepth = 0;
+
+  for (let index = nameIndex + 2; index < analysis.tokens.length; index++) {
+    const token = analysis.tokens[index];
+    if (token.kind !== "punctuation") continue;
+
+    if (token.value === "(") roundDepth++;
+    else if (token.value === ")") {
+      if (roundDepth === 0 && squareDepth === 0 && curlyDepth === 0) {
+        if (segmentStart < index) {
+          parameters.push({
+            label: analysis.text.slice(
+              analysis.tokens[segmentStart].start,
+              analysis.tokens[index - 1].end
+            ).trim()
+          });
+        }
+        break;
+      }
+      roundDepth--;
+    } else if (token.value === "[") squareDepth++;
+    else if (token.value === "]") squareDepth = Math.max(0, squareDepth - 1);
+    else if (token.value === "{") curlyDepth++;
+    else if (token.value === "}") curlyDepth = Math.max(0, curlyDepth - 1);
+    else if (
+      token.value === "," &&
+      roundDepth === 0 && squareDepth === 0 && curlyDepth === 0
+    ) {
+      if (segmentStart < index) {
+        parameters.push({
+          label: analysis.text.slice(
+            analysis.tokens[segmentStart].start,
+            analysis.tokens[index - 1].end
+          ).trim()
+        });
+      }
+      segmentStart = index + 1;
+    }
+  }
+
+  return parameters;
+};
+
 const doSignHelp = (
   document: TextDocument,
   position: Position
@@ -997,16 +1053,26 @@ const doSignHelp = (
   const result = findFunctionIdentifier(content, cursorIndex);
   if (result.identifier === "") return undefined;
 
+  const resolved = findFunctionSymbolInIncludeClosure(
+    document.uri,
+    result.identifier
+  );
   const snip = getFunctionInCompilationUnit(document.uri, result.identifier);
-  if (!snip) return undefined;
+  if (!resolved && !snip) return undefined;
+
+  const parameters = resolved
+    ? getFunctionSignatureParameters(resolved.analysis, resolved.symbol)
+    : snip?.params || [];
 
   return {
-    activeParameter: Math.min(result.parameterIndex, Math.max(0, (snip.params || []).length - 1)),
+    activeParameter: parameters.length > 0
+      ? Math.min(result.parameterIndex, parameters.length - 1)
+      : 0,
     activeSignature: 0,
     signatures: [{
-      label: snip.completion.label || result.identifier,
-      parameters: snip.params,
-      documentation: snip.completion.documentation,
+      label: resolved?.symbol.detail || snip?.completion.label || result.identifier,
+      parameters,
+      documentation: snip?.completion.documentation,
     }],
   };
 };
