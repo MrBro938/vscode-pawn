@@ -413,3 +413,41 @@ assert.equal(
   "block documentation",
   "block comments should remain macro documentation"
 );
+
+
+const lexerCompatibilitySource = [
+  "  new Float:g_value = 12.5e+2;",
+  'printf("escaped \\" quote \\n and value %d", g_value);',
+  "/* block comment with FakeCall(1) */",
+  "// line comment with HiddenCall(2)",
+  "new _private@name = 0xFF;",
+  "new value2 = 123abc_4.5;",
+  "new spacedValue\u00a0=\u30001;"
+].join("\n");
+const lexerCompatibilityTokens = tokenizePawn(lexerCompatibilitySource);
+assert.deepEqual(
+  lexerCompatibilityTokens.map(({ value, kind }) => [value, kind]),
+  [
+    ["new", "identifier"], ["Float", "identifier"], [":", "punctuation"],
+    ["g_value", "identifier"], ["=", "punctuation"], ["12.5e+2", "number"],
+    [";", "punctuation"], ["printf", "identifier"], ["(", "punctuation"],
+    ['"escaped \\" quote \\n and value %d"', "string"], [",", "punctuation"],
+    ["g_value", "identifier"], [")", "punctuation"], [";", "punctuation"],
+    ["/* block comment with FakeCall(1) */", "comment"],
+    ["// line comment with HiddenCall(2)", "comment"],
+    ["new", "identifier"], ["_private@name", "identifier"], ["=", "punctuation"],
+    ["0", "number"], ["xFF", "identifier"], [";", "punctuation"],
+    ["new", "identifier"], ["value2", "identifier"], ["=", "punctuation"],
+    ["123abc_4.5", "number"], [";", "punctuation"],
+    ["new", "identifier"], ["spacedValue", "identifier"], ["=", "punctuation"],
+    ["1", "number"], [";", "punctuation"]
+  ],
+  "optimized lexer must preserve token values and kinds, including Unicode whitespace"
+);
+assert.equal(
+  lexerCompatibilityTokens.every((token) =>
+    token.value === lexerCompatibilitySource.slice(token.start, token.end)
+  ),
+  true,
+  "token offsets must continue to map to exact source slices"
+);

@@ -517,7 +517,16 @@ const removeDocumentSymbols = (uri: string) => {
 
 const analyzePawnMeasured = (uri: string, text: string): PawnAnalysis => {
   const startedAt = performanceStats.isEnabled ? performance.now() : 0;
-  const analysis = performanceStats.measure("analysis.parse", () => analyzePawn(text));
+  const analysis = performanceStats.measure("analysis.parse", () => {
+    const tokens = performanceStats.measure(
+      "analysis.tokenize",
+      () => tokenizePawn(text)
+    );
+    return performanceStats.measure(
+      "analysis.symbolBuild",
+      () => analyzePawn(text, tokens)
+    );
+  });
   performanceStats.count("analysis.filesParsed");
   performanceStats.count("analysis.tokens", analysis.tokens.length);
   performanceStats.count("analysis.symbols", analysis.symbols.length);

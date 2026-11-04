@@ -350,8 +350,11 @@ const extractPawnMacroSymbols = (
   return symbols;
 };
 
-export const analyzePawn = (text: string): PawnAnalysis => {
-  const tokens = tokenizePawn(text);
+export const analyzePawn = (
+  text: string,
+  pretokenizedTokens?: PawnToken[]
+): PawnAnalysis => {
+  const tokens = pretokenizedTokens || tokenizePawn(text);
   const symbols: PawnSymbol[] = [];
   const functions: FunctionRegion[] = [];
   const pendingInitializers: Array<{ symbol: PawnSymbol; expression: string }> = [];

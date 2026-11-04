@@ -8,51 +8,85 @@ export interface PawnToken {
 }
 
 /**
+ * Pawn lexer character checks. The common ASCII path avoids running regular
+ * expressions for every character in large gamemodes, while non-ASCII
+ * whitespace keeps the same ECMAScript \s behavior as the original lexer.
+ */
+const isPawnWhitespace = (code: number): boolean => {
+  if (code <= 0x20) return code >= 0x09;
+  return code === 0x00a0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000 ||
+    code === 0xfeff;
+};
+
+const isIdentifierStart = (code: number): boolean =>
+  (code >= 0x41 && code <= 0x5a) ||
+  (code >= 0x61 && code <= 0x7a) ||
+  code === 0x5f ||
+  code === 0x40;
+
+const isIdentifierPart = (code: number): boolean =>
+  isIdentifierStart(code) || (code >= 0x30 && code <= 0x39);
+
+const isNumberPart = (code: number): boolean =>
+  isIdentifierPart(code) || code === 0x2e;
+
+/**
  * Lightweight Pawn lexer shared by references, rename and semantic tokens.
  * Comments and strings are emitted as separate tokens so identifiers inside
  * them are never mistaken for code references.
  */
 export const tokenizePawn = (source: string): PawnToken[] => {
   const tokens: PawnToken[] = [];
+  const length = source.length;
   let index = 0;
 
-  while (index < source.length) {
-    const character = source[index];
-    const next = source[index + 1];
+  while (index < length) {
+    const code = source.charCodeAt(index);
+    const nextCode = index + 1 < length ? source.charCodeAt(index + 1) : 0;
 
-    if (/\s/.test(character)) {
+    if (isPawnWhitespace(code)) {
       index++;
       continue;
     }
 
-    if (character === "/" && next === "/") {
+    if (code === 0x2f && nextCode === 0x2f) {
       const start = index;
       index += 2;
-      while (index < source.length && source[index] !== "\n") index++;
+      while (index < length && source.charCodeAt(index) !== 0x0a) index++;
       tokens.push({ value: source.slice(start, index), start, end: index, kind: "comment" });
       continue;
     }
 
-    if (character === "/" && next === "*") {
+    if (code === 0x2f && nextCode === 0x2a) {
       const start = index;
       index += 2;
-      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) {
+      while (index < length &&
+        !(source.charCodeAt(index) === 0x2a &&
+          source.charCodeAt(index + 1) === 0x2f)) {
         index++;
       }
-      if (index < source.length) index += 2;
+      if (index < length) index += 2;
       tokens.push({ value: source.slice(start, index), start, end: index, kind: "comment" });
       continue;
     }
 
-    if (character === "\"" || character === "'") {
-      const quote = character;
+    if (code === 0x22 || code === 0x27) {
+      const quote = code;
       const start = index++;
-      while (index < source.length) {
-        if (source[index] === "\\") {
-          index = Math.min(source.length, index + 2);
+      while (index < length) {
+        const current = source.charCodeAt(index);
+        if (current === 0x5c) {
+          index = Math.min(length, index + 2);
           continue;
         }
-        if (source[index] === quote) {
+        if (current === quote) {
           index++;
           break;
         }
@@ -62,22 +96,22 @@ export const tokenizePawn = (source: string): PawnToken[] => {
       continue;
     }
 
-    if (/[A-Za-z_@]/.test(character)) {
+    if (isIdentifierStart(code)) {
       const start = index++;
-      while (index < source.length && /[A-Za-z0-9_@]/.test(source[index])) index++;
+      while (index < length && isIdentifierPart(source.charCodeAt(index))) index++;
       tokens.push({ value: source.slice(start, index), start, end: index, kind: "identifier" });
       continue;
     }
 
-    if (/[0-9]/.test(character)) {
+    if (code >= 0x30 && code <= 0x39) {
       const start = index++;
-      while (index < source.length && /[A-Za-z0-9_.]/.test(source[index])) index++;
+      while (index < length && isNumberPart(source.charCodeAt(index))) index++;
       tokens.push({ value: source.slice(start, index), start, end: index, kind: "number" });
       continue;
     }
 
     tokens.push({
-      value: character,
+      value: source[index],
       start: index,
       end: index + 1,
       kind: "punctuation",
