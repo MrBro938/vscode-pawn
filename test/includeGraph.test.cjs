@@ -22,7 +22,12 @@ const files = new Map([
   [apiA, "/workspace/sourse/modules/a/public/api.inc"],
   [sideA, "/workspace/sourse/modules/a/private/side.inc"],
   [apiB, "/workspace/sourse/modules/b/public/api.inc"],
-  [common, "/workspace/sourse/shared/common.inc"]
+  [common, "/workspace/sourse/shared/common.inc"],
+  ["file:///workspace/dependencies/YSI-Includes/YSI_Coding/y_hooks.inc", "/workspace/dependencies/YSI-Includes/YSI_Coding/y_hooks.inc"],
+  ["file:///workspace/custom/YSI_Coding/y_hooks.inc", "/workspace/custom/YSI_Coding/y_hooks.inc"],
+  ["file:///workspace/gamemodes/local_only.inc", "/workspace/gamemodes/local_only.inc"],
+  ["file:///workspace/gamemodes/relative.inc", "/workspace/gamemodes/relative.inc"],
+  ["file:///workspace/custom/relative.inc", "/workspace/custom/relative.inc"]
 ]);
 
 const texts = new Map([
@@ -69,11 +74,14 @@ const includes = extractPawnIncludes([
 ].join("\n"));
 assert.deepEqual(
   includes,
-  ["real.inc", "standard.inc"],
-  "only active include directives should be parsed"
+  [
+    { path: "real.inc", mode: "quoted" },
+    { path: "standard.inc", mode: "system" }
+  ],
+  "only active include directives should be parsed and include delimiters must be preserved"
 );
 
-const graph = buildPawnIncludeGraph(files, texts, pathIndex);
+const graph = buildPawnIncludeGraph(files, texts, pathIndex, ["/workspace"]);
 const unitA = getCompilationUnitUris(rootA, graph);
 const unitB = getCompilationUnitUris(rootB, graph);
 const includedApiA = getIncludedFileUris(apiA, graph);
@@ -102,10 +110,63 @@ assert.ok(!unitB.has(apiA), "mode B must not include mode A's module");
 const resolved = resolveIncludeUris(
   rootA,
   "sourse/modules/a/public/api.inc",
+  "quoted",
   files,
-  pathIndex
+  pathIndex,
+  ["/workspace"]
 );
 assert.deepEqual(resolved, [apiA], "project-root include path should resolve to the indexed module");
+
+const ysiFirst = "file:///workspace/dependencies/YSI-Includes/YSI_Coding/y_hooks.inc";
+const ysiSecond = "file:///workspace/custom/YSI_Coding/y_hooks.inc";
+assert.deepEqual(
+  resolveIncludeUris(
+    rootA,
+    "YSI_Coding/y_hooks",
+    "system",
+    files,
+    pathIndex,
+    ["/workspace/dependencies/YSI-Includes", "/workspace/custom"]
+  ),
+  [ysiFirst],
+  "angle includes should select the first matching compiler include directory"
+);
+assert.deepEqual(
+  resolveIncludeUris(
+    rootA,
+    "YSI_Coding/y_hooks",
+    "system",
+    files,
+    pathIndex,
+    ["/workspace/custom", "/workspace/dependencies/YSI-Includes"]
+  ),
+  [ysiSecond],
+  "changing compiler include directory order should change the selected file"
+);
+assert.deepEqual(
+  resolveIncludeUris(
+    rootA,
+    "relative",
+    "quoted",
+    files,
+    pathIndex,
+    ["/workspace/custom"]
+  ),
+  ["file:///workspace/gamemodes/relative.inc"],
+  "quoted includes should prefer the including file's directory over -i paths"
+);
+assert.deepEqual(
+  resolveIncludeUris(
+    rootA,
+    "local_only",
+    "system",
+    files,
+    pathIndex,
+    ["/workspace/custom"]
+  ),
+  [],
+  "angle includes must not resolve from the including file's directory"
+);
 
 const isolated = getCompilationUnitUris("file:///workspace/other/isolated.pwn", graph);
 assert.deepEqual(
