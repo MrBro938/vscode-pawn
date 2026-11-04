@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { parse as parseYaml } from "yaml";
 
 type JsonObject = { [key: string]: unknown };
 
@@ -108,11 +109,23 @@ const firstBuildConfiguration = (packageDefinition: JsonObject): PackageBuild[] 
 };
 
 const readPackageDefinition = (directory: string): JsonObject | undefined => {
-  const filename = path.join(directory, "pawn.json");
-  if (!isFile(filename)) return undefined;
+  // sampctl supports either manifest format. Keep pawn.json first so existing
+  // projects retain their current behavior if both files are present.
+  const jsonFilename = path.join(directory, "pawn.json");
+  if (isFile(jsonFilename)) {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(jsonFilename, "utf8"));
+      if (isObject(parsed)) return parsed;
+    } catch {
+      // Fall back to pawn.yaml when the JSON manifest is invalid.
+    }
+  }
+
+  const yamlFilename = path.join(directory, "pawn.yaml");
+  if (!isFile(yamlFilename)) return undefined;
 
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(filename, "utf8"));
+    const parsed: unknown = parseYaml(fs.readFileSync(yamlFilename, "utf8"));
     return isObject(parsed) ? parsed : undefined;
   } catch {
     return undefined;
