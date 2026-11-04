@@ -153,6 +153,7 @@
     "dependencies": {
         "vscode-languageclient": "^11.0.0",
         "vscode-languageserver": "^11.0.0",
-        "vscode-languageserver-textdocument": "^1.0.16"
+        "vscode-languageserver-textdocument": "^1.0.16",
+        "yaml": "^2.9.1"
     }
 }
