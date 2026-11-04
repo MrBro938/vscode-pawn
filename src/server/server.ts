@@ -40,6 +40,7 @@ import {
   getPawnMacroSignature,
   PawnCompletionSource,
 } from "./completion";
+import { CompletionSourcesCache } from "./completionSourceCache";
 import {
   formatPawnFunctionSignature,
   formatPawnSymbolHover,
@@ -87,6 +88,18 @@ connection.onRequest("pawn/performanceStats", () => performanceStats.snapshot())
 const PARSE_DEBOUNCE_MS = 150;
 const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
 const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>();
+
+interface CompletionSourcesSnapshot {
+  sources: PawnCompletionSource[];
+  includeFiles: number;
+  sourceSymbols: number;
+}
+
+// Completion source analyses change only when source text, the indexed file
+// set, include graph or search scope changes. A lazy analysis cache miss in an
+// unrelated file must not invalidate these prepared sources.
+const completionSourcesCache = new CompletionSourcesCache<CompletionSourcesSnapshot>(8);
+const invalidateCompletionSources = () => completionSourcesCache.clear();
 const indexedSymbolTexts = new Map<string, string>();
 let semanticTokensRefreshSupported = false;
 
@@ -131,16 +144,21 @@ let configuredCompilerPath = "";
 let configuredFunctionSearchScope: PawnFunctionSearchScope = "includes";
 
 const setFunctionSearchScope = (scope?: string) => {
-  configuredFunctionSearchScope =
+  const nextScope: PawnFunctionSearchScope =
     scope === "compilationUnit" || scope === "workspace"
       ? scope
       : "includes";
+  if (nextScope === configuredFunctionSearchScope) return;
+
+  configuredFunctionSearchScope = nextScope;
+  invalidateCompletionSources();
 };
 
 const rebuildIncludeGraph = () => performanceStats.measure(
   "include.graphRebuild",
   () => {
     semanticTokensGeneration++;
+    invalidateCompletionSources();
     includeGraph = buildPawnIncludeGraph(
       indexedPawnFiles,
       indexedPawnTexts,
@@ -172,6 +190,7 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
 
     if (textChanged) {
       semanticTokensGeneration++;
+      invalidateCompletionSources();
       indexedSymbolTexts.delete(uri);
       analysisCache.delete(uri);
       removeDocumentSymbols(uri);
@@ -233,6 +252,7 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
   if (!filePath) return;
 
   semanticTokensGeneration++;
+  invalidateCompletionSources();
   indexedPawnFiles.delete(uri);
   indexedPawnPathIndex.delete(normalizePawnPath(filePath));
   configuredIncludeFileUris.delete(uri);
@@ -694,40 +714,61 @@ connection.onDocumentSymbol((params) => {
   return document ? getDocumentSymbols(document) : [];
 });
 
+const getCompletionSources = (uri: string): CompletionSourcesSnapshot => {
+  const cached = completionSourcesCache.getOrCreate(uri, () => {
+    const visibleUris = getFunctionSearchUris(uri);
+    const sources: PawnCompletionSource[] = [];
+    let sourceSymbols = 0;
+
+    performanceStats.measure("completion.sourcePreparation", () => {
+      visibleUris.forEach((visibleUri) => {
+        performanceStats.count("completion.filesVisited");
+        const text = getDocumentText(visibleUri);
+        const analysisEntry = analysisCache.get(visibleUri);
+        if (!analysisEntry || analysisEntry.text !== text) {
+          performanceStats.count("completion.filesParsedOnDemand");
+        }
+
+        const analysis = performanceStats.measure(
+          "completion.getAnalysis",
+          () => getAnalysis(visibleUri)
+        );
+        if (analysis) {
+          sources.push({ uri: visibleUri, analysis });
+          sourceSymbols += analysis.symbols.length;
+        }
+      });
+    });
+
+    return {
+      sources,
+      includeFiles: visibleUris.size,
+      sourceSymbols,
+    };
+  });
+
+  performanceStats.count(
+    cached.cacheHit
+      ? "completion.sourceCacheHits"
+      : "completion.sourceCacheMisses"
+  );
+  return cached.value;
+};
+
 const buildCompletionItems = (
   uri: string,
   offset: number,
   prefix: string
 ): CompletionItem[] => {
-  const visibleUris = getFunctionSearchUris(uri);
-  performanceStats.count("completion.includeFiles", visibleUris.size);
-
-  const sources: PawnCompletionSource[] = [];
-  performanceStats.measure("completion.sourcePreparation", () => {
-    visibleUris.forEach((visibleUri) => {
-      performanceStats.count("completion.filesVisited");
-      const text = getDocumentText(visibleUri);
-      const cached = analysisCache.get(visibleUri);
-      if (!cached || cached.text !== text) {
-        performanceStats.count("completion.filesParsedOnDemand");
-      }
-
-      const analysis = performanceStats.measure(
-        "completion.getAnalysis",
-        () => getAnalysis(visibleUri)
-      );
-      if (analysis) {
-        sources.push({ uri: visibleUri, analysis });
-        performanceStats.count("completion.sourceSymbols", analysis.symbols.length);
-      }
-    });
-  });
+  const prepared = getCompletionSources(uri);
+  performanceStats.count("completion.includeFiles", prepared.includeFiles);
+  performanceStats.count("completion.sourceSymbols", prepared.sourceSymbols);
 
   const items = performanceStats.measure(
     "completion.buildItems",
-    () => buildPawnCompletionItems(uri, offset, sources, prefix)
+    () => buildPawnCompletionItems(uri, offset, prepared.sources, prefix)
   );
-  performanceStats.count("completion.sources", sources.length);
+  performanceStats.count("completion.sources", prepared.sources.length);
   performanceStats.count("completion.candidateItems", items.length);
   return items;
 };
