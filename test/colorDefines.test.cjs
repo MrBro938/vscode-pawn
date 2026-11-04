@@ -56,15 +56,37 @@ assert.deepEqual(
   "parenthesized RGB values should be resolved"
 );
 assert.deepEqual(
-  byName.get("COLOR_ALIAS"),
-  byName.get("COLOR_GREY"),
-  "aliases should resolve to the referenced color define"
+  {
+    red: byName.get("COLOR_ALIAS").red,
+    green: byName.get("COLOR_ALIAS").green,
+    blue: byName.get("COLOR_ALIAS").blue,
+    alpha: byName.get("COLOR_ALIAS").alpha
+  },
+  {
+    red: byName.get("COLOR_GREY").red,
+    green: byName.get("COLOR_GREY").green,
+    blue: byName.get("COLOR_GREY").blue,
+    alpha: byName.get("COLOR_GREY").alpha
+  },
+  "aliases should resolve to the referenced color channels while retaining their own names"
 );
+assert.equal(byName.get("COLOR_ALIAS").name, "COLOR_ALIAS");
 assert.deepEqual(
-  byName.get("COLOR_FORWARD"),
-  byName.get("COLOR_WHITE"),
-  "parenthesized aliases should resolve"
+  {
+    red: byName.get("COLOR_FORWARD").red,
+    green: byName.get("COLOR_FORWARD").green,
+    blue: byName.get("COLOR_FORWARD").blue,
+    alpha: byName.get("COLOR_FORWARD").alpha
+  },
+  {
+    red: byName.get("COLOR_WHITE").red,
+    green: byName.get("COLOR_WHITE").green,
+    blue: byName.get("COLOR_WHITE").blue,
+    alpha: byName.get("COLOR_WHITE").alpha
+  },
+  "parenthesized aliases should resolve while retaining their own names"
 );
+assert.equal(byName.get("COLOR_FORWARD").name, "COLOR_FORWARD");
 assert.equal(byName.get("COLOR_MULTILINE").red, 1);
 assert.equal(byName.get("COLOR_MULTILINE").blue, 1);
 assert.deepEqual(
