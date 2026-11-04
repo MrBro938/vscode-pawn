@@ -4,6 +4,29 @@ export interface CompletionSourcesCacheResult<T> {
 }
 
 /**
+ * Refresh only entries that are ready. Pending entries remain stale so a
+ * later request can pick up their completed background analysis.
+ */
+export function refreshReadyCompletionSources(
+  staleUris: Set<string>,
+  isReady: (uri: string) => boolean,
+  refresh: (uri: string) => void
+): number {
+  const deferred = new Set<string>();
+  staleUris.forEach((uri) => {
+    if (!isReady(uri)) {
+      deferred.add(uri);
+      return;
+    }
+    refresh(uri);
+  });
+
+  staleUris.clear();
+  deferred.forEach((uri) => staleUris.add(uri));
+  return deferred.size;
+}
+
+/**
  * Small LRU cache for prepared completion sources.
  *
  * Call clear() whenever source contents, the include graph, indexed files or

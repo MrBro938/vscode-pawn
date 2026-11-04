@@ -40,7 +40,10 @@ import {
   getPawnMacroSignature,
   PawnCompletionSource,
 } from "./completion";
-import { CompletionSourcesCache } from "./completionSourceCache";
+import {
+  CompletionSourcesCache,
+  refreshReadyCompletionSources,
+} from "./completionSourceCache";
 import {
   formatPawnFunctionSignature,
   formatPawnSymbolHover,
@@ -767,30 +770,47 @@ const getCompletionSources = (uri: string): CompletionSourcesSnapshot => {
     performanceStats.count("completion.sourceCacheHits");
 
     if (snapshot.staleUris.size > 0) {
-      performanceStats.measure("completion.sourceRefresh", () => {
-        snapshot.staleUris.forEach((staleUri) => {
-          const sourceIndex = snapshot.sourceIndexByUri.get(staleUri);
-          if (sourceIndex === undefined) return;
+      const deferred = performanceStats.measure("completion.sourceRefresh", () =>
+        refreshReadyCompletionSources(
+          snapshot.staleUris,
+          (staleUri) => {
+            const text = getDocumentText(staleUri);
+            const cachedAnalysis = analysisCache.get(staleUri);
+            // A current cached analysis is always safe to apply. Otherwise,
+            // wait for the document's debounced background parse rather than
+            // forcing a 500ms+ full-file parse in the completion request.
+            return cachedAnalysis?.text === text || !pendingParses.has(staleUri);
+          },
+          (staleUri) => {
+            const sourceIndex = snapshot.sourceIndexByUri.get(staleUri);
+            if (sourceIndex === undefined) return;
 
-          const previous = snapshot.sources[sourceIndex];
-          const text = getDocumentText(staleUri);
-          const analysisEntry = analysisCache.get(staleUri);
-          if (!analysisEntry || analysisEntry.text !== text) {
-            performanceStats.count("completion.filesParsedOnDemand");
+            const previous = snapshot.sources[sourceIndex];
+            const text = getDocumentText(staleUri);
+            const cachedAnalysis = analysisCache.get(staleUri);
+            let analysis = cachedAnalysis?.text === text
+              ? cachedAnalysis.analysis
+              : undefined;
+
+            if (!analysis) {
+              if (text === undefined) return;
+              performanceStats.count("completion.filesParsedOnDemand");
+              analysis = performanceStats.measure(
+                "completion.getAnalysis",
+                () => getAnalysis(staleUri)
+              );
+            }
+            if (!analysis) return;
+
+            snapshot.sourceSymbols += analysis.symbols.length - previous.analysis.symbols.length;
+            snapshot.sources[sourceIndex] = { uri: staleUri, analysis };
+            performanceStats.count("completion.sourceCacheRefreshedFiles");
           }
-
-          const analysis = performanceStats.measure(
-            "completion.getAnalysis",
-            () => getAnalysis(staleUri)
-          );
-          if (!analysis) return;
-
-          snapshot.sourceSymbols += analysis.symbols.length - previous.analysis.symbols.length;
-          snapshot.sources[sourceIndex] = { uri: staleUri, analysis };
-          performanceStats.count("completion.sourceCacheRefreshedFiles");
-        });
-      });
-      snapshot.staleUris.clear();
+        )
+      );
+      if (deferred > 0) {
+        performanceStats.count("completion.sourceRefreshDeferred", deferred);
+      }
     }
   } else {
     performanceStats.count("completion.sourceCacheMisses");
