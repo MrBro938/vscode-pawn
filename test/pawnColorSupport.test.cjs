@@ -94,7 +94,7 @@ assert.equal(
     { red: 1, green: 0, blue: 0, alpha: 0.5 },
     "0xFF0000"
   ),
-  "0xff000080",
+  "0xFF000080",
   "choosing transparency for an RGB literal should add the trailing alpha byte"
 );
 assert.equal(
