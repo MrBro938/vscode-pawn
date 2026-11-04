@@ -23,6 +23,11 @@ const rebuiltAfterEviction = cache.getOrCreate("main.pwn", build("after-eviction
 assert.equal(rebuiltAfterEviction.cacheHit, false, "least recently used entries should be evicted");
 assert.deepEqual(rebuiltAfterEviction.value, { value: "after-eviction" });
 
+const iteratedValues = [];
+cache.forEachValue((value) => iteratedValues.push(value.value));
+assert.ok(iteratedValues.includes("other") || iteratedValues.includes("third"),
+  "cache iteration should expose current LRU values for dependency invalidation");
+
 cache.clear();
 const rebuiltAfterInvalidation = cache.getOrCreate("main.pwn", build("after-change"));
 assert.equal(rebuiltAfterInvalidation.cacheHit, false, "source changes must be able to invalidate cached snapshots");

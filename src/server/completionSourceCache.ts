@@ -37,6 +37,10 @@ export class CompletionSourcesCache<T> {
     return { value, cacheHit: false };
   }
 
+  forEachValue(callback: (value: T) => void): void {
+    this.entries.forEach(callback);
+  }
+
   clear(): void {
     this.entries.clear();
   }

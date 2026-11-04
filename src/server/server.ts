@@ -91,6 +91,8 @@ const analysisCache = new Map<string, { text: string; analysis: PawnAnalysis }>(
 
 interface CompletionSourcesSnapshot {
   sources: PawnCompletionSource[];
+  sourceIndexByUri: Map<string, number>;
+  staleUris: Set<string>;
   includeFiles: number;
   sourceSymbols: number;
 }
@@ -100,6 +102,14 @@ interface CompletionSourcesSnapshot {
 // unrelated file must not invalidate these prepared sources.
 const completionSourcesCache = new CompletionSourcesCache<CompletionSourcesSnapshot>(8);
 const invalidateCompletionSources = () => completionSourcesCache.clear();
+
+// Ordinary source edits only stale the corresponding analysis in snapshots.
+// Include-graph and file-set changes still clear the complete cache.
+const markCompletionSourceStale = (uri: string) => {
+  completionSourcesCache.forEachValue((snapshot) => {
+    if (snapshot.sourceIndexByUri.has(uri)) snapshot.staleUris.add(uri);
+  });
+};
 const indexedSymbolTexts = new Map<string, string>();
 let semanticTokensRefreshSupported = false;
 
@@ -190,7 +200,8 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
 
     if (textChanged) {
       semanticTokensGeneration++;
-      invalidateCompletionSources();
+      markCompletionSourceStale(uri);
+      if (includeGraphChanged) invalidateCompletionSources();
       indexedSymbolTexts.delete(uri);
       analysisCache.delete(uri);
       removeDocumentSymbols(uri);
@@ -718,6 +729,7 @@ const getCompletionSources = (uri: string): CompletionSourcesSnapshot => {
   const cached = completionSourcesCache.getOrCreate(uri, () => {
     const visibleUris = getFunctionSearchUris(uri);
     const sources: PawnCompletionSource[] = [];
+    const sourceIndexByUri = new Map<string, number>();
     let sourceSymbols = 0;
 
     performanceStats.measure("completion.sourcePreparation", () => {
@@ -734,6 +746,7 @@ const getCompletionSources = (uri: string): CompletionSourcesSnapshot => {
           () => getAnalysis(visibleUri)
         );
         if (analysis) {
+          sourceIndexByUri.set(visibleUri, sources.length);
           sources.push({ uri: visibleUri, analysis });
           sourceSymbols += analysis.symbols.length;
         }
@@ -742,17 +755,48 @@ const getCompletionSources = (uri: string): CompletionSourcesSnapshot => {
 
     return {
       sources,
+      sourceIndexByUri,
+      staleUris: new Set<string>(),
       includeFiles: visibleUris.size,
       sourceSymbols,
     };
   });
 
-  performanceStats.count(
-    cached.cacheHit
-      ? "completion.sourceCacheHits"
-      : "completion.sourceCacheMisses"
-  );
-  return cached.value;
+  const snapshot = cached.value;
+  if (cached.cacheHit) {
+    performanceStats.count("completion.sourceCacheHits");
+
+    if (snapshot.staleUris.size > 0) {
+      performanceStats.measure("completion.sourceRefresh", () => {
+        snapshot.staleUris.forEach((staleUri) => {
+          const sourceIndex = snapshot.sourceIndexByUri.get(staleUri);
+          if (sourceIndex === undefined) return;
+
+          const previous = snapshot.sources[sourceIndex];
+          const text = getDocumentText(staleUri);
+          const analysisEntry = analysisCache.get(staleUri);
+          if (!analysisEntry || analysisEntry.text !== text) {
+            performanceStats.count("completion.filesParsedOnDemand");
+          }
+
+          const analysis = performanceStats.measure(
+            "completion.getAnalysis",
+            () => getAnalysis(staleUri)
+          );
+          if (!analysis) return;
+
+          snapshot.sourceSymbols += analysis.symbols.length - previous.analysis.symbols.length;
+          snapshot.sources[sourceIndex] = { uri: staleUri, analysis };
+          performanceStats.count("completion.sourceCacheRefreshedFiles");
+        });
+      });
+      snapshot.staleUris.clear();
+    }
+  } else {
+    performanceStats.count("completion.sourceCacheMisses");
+  }
+
+  return snapshot;
 };
 
 const buildCompletionItems = (
