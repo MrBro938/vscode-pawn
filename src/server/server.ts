@@ -658,9 +658,34 @@ connection.languages.semanticTokens.on((params) => {
     });
   });
 
-  const localSymbols = analysis.symbols.filter(
-    (symbol) => symbol.kind === "local" || symbol.kind === "parameter"
+  const localSymbolsByName = new Map<string, PawnSymbol[]>();
+  analysis.symbols.forEach((symbol) => {
+    if (symbol.kind !== "local" && symbol.kind !== "parameter") return;
+
+    const matches = localSymbolsByName.get(symbol.name) || [];
+    matches.push(symbol);
+    localSymbolsByName.set(symbol.name, matches);
+  });
+  // Keep the most recently declared candidate first so resolving a local
+  // identifier does not filter and sort the complete symbol list each time.
+  localSymbolsByName.forEach((matches) =>
+    matches.sort((left, right) => right.start - left.start)
   );
+
+  const typeAnnotationStarts = new Set<number>();
+  for (let index = 0; index < analysis.tokens.length - 1; index++) {
+    const token = analysis.tokens[index];
+    const next = analysis.tokens[index + 1];
+    if (
+      token.kind === "identifier" &&
+      token.end === next.start &&
+      next.kind === "punctuation" &&
+      next.value === ":"
+    ) {
+      typeAnnotationStarts.add(token.start);
+    }
+  }
+
   const declarations = new Map<number, PawnSymbol>();
   analysis.symbols.forEach((symbol) => declarations.set(symbol.start, symbol));
 
@@ -692,19 +717,14 @@ connection.languages.semanticTokens.on((params) => {
         }
       } else if (pawnKeywords.has(normalized)) {
         tokenType = "keyword";
-      } else if (analysis.tokens.some((candidate) =>
-        candidate.start === token.end && candidate.kind === "punctuation" && candidate.value === ":"
-      )) {
+      } else if (typeAnnotationStarts.has(token.start)) {
         tokenType = "type";
       } else {
-        const local = localSymbols
-          .filter((symbol) =>
-            symbol.name === token.value &&
-            token.start >= symbol.scopeStart &&
-            token.start <= symbol.scopeEnd &&
-            symbol.start <= token.start
-          )
-          .sort((a, b) => b.start - a.start)[0];
+        const local = localSymbolsByName.get(token.value)?.find((symbol) =>
+          token.start >= symbol.scopeStart &&
+          token.start <= symbol.scopeEnd &&
+          symbol.start <= token.start
+        );
 
         const kind = local?.kind || projectKinds.get(token.value);
         if (kind === "function") tokenType = "function";
