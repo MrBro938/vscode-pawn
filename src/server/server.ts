@@ -100,6 +100,7 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
 
   try {
     const filePath = path.resolve(fileURLToPath(uri));
+    const wasIndexed = indexedPawnFiles.has(uri);
     const previousText = indexedPawnTexts.get(uri);
     const textChanged = text !== undefined && previousText !== text;
     const includeGraphChanged = text !== undefined && textChanged && (
@@ -133,8 +134,33 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
       matches.add(uri);
     }
 
-    if (rebuildGraph && (previousText === undefined || includeGraphChanged)) {
-      rebuildIncludeGraph();
+    const isWorkspaceFile = configuredWorkspaceRoots.some((root) => {
+      const relativePath = path.relative(root, filePath);
+      return relativePath === "" ||
+        (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+    });
+    const isConfiguredExternalInclude = !isWorkspaceFile &&
+      configuredIncludeDirectories.some((directory) => {
+        const relativePath = path.relative(directory, filePath);
+        return relativePath === "" ||
+          (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+      });
+    if (isConfiguredExternalInclude) configuredIncludeFileUris.add(uri);
+
+    if (rebuildGraph) {
+      if (!wasIndexed) {
+        rebuildIncludeGraph();
+      } else if (includeGraphChanged) {
+        includeGraph = updatePawnIncludeGraph(
+          includeGraph,
+          uri,
+          indexedPawnFiles,
+          indexedPawnTexts,
+          includePathIndex,
+          configuredIncludeDirectories,
+          indexedPawnPathIndex
+        );
+      }
     }
   } catch {
     // Ignore malformed or unsupported URIs.
@@ -147,6 +173,7 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
 
   indexedPawnFiles.delete(uri);
   indexedPawnPathIndex.delete(normalizePawnPath(filePath));
+  configuredIncludeFileUris.delete(uri);
   indexedPawnTexts.delete(uri);
   indexedSymbolTexts.delete(uri);
   analysisCache.delete(uri);
