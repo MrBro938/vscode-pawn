@@ -8,6 +8,7 @@ import {
   PerformanceSnapshot,
   formatPerformanceSnapshot,
 } from "./performance";
+import { PawnDocumentColorProvider } from "./pawnColorProvider";
 
 let client: LanguageClient;
 let clientReady = false;
@@ -241,6 +242,68 @@ export async function activate(context: vscode.ExtensionContext) {
   const activationStartedAt = performance.now();
   performanceStats.setEnabled(
     vscode.workspace.getConfiguration("pawn").get<boolean>("performanceLogging", false)
+  );
+
+  const pawnColorProvider = new PawnDocumentColorProvider();
+  let pawnColorProviderRegistration = vscode.languages.registerColorProvider(
+    { language: "pawn" },
+    pawnColorProvider
+  );
+  let pawnColorRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const schedulePawnColorRefresh = () => {
+    if (pawnColorRefreshTimer) clearTimeout(pawnColorRefreshTimer);
+    pawnColorRefreshTimer = setTimeout(() => {
+      pawnColorRefreshTimer = undefined;
+      // Re-registering fires VS Code's native color-provider change event.
+      // The provider then recalculates only the current viewport + its prefetch
+      // margin, reusing cached per-line results for overlapping ranges.
+      pawnColorProviderRegistration.dispose();
+      pawnColorProviderRegistration = vscode.languages.registerColorProvider(
+        { language: "pawn" },
+        pawnColorProvider
+      );
+    }, 120);
+  };
+
+  const updatePawnColorViewport = (editor: vscode.TextEditor | undefined) => {
+    if (!editor || editor.document.languageId !== "pawn") return;
+    if (pawnColorProvider.isViewportCovered(editor.document, editor.visibleRanges)) return;
+    schedulePawnColorRefresh();
+  };
+
+  context.subscriptions.push(
+    new vscode.Disposable(() => {
+      if (pawnColorRefreshTimer) clearTimeout(pawnColorRefreshTimer);
+      pawnColorRefreshTimer = undefined;
+      pawnColorProviderRegistration.dispose();
+      pawnColorProvider.dispose();
+    }),
+    vscode.window.onDidChangeTextEditorVisibleRanges((event) => {
+      updatePawnColorViewport(event.textEditor);
+    }),
+    vscode.window.onDidChangeVisibleTextEditors((editors) => {
+      editors.forEach(updatePawnColorViewport);
+    }),
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      updatePawnColorViewport(editor);
+    }),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      if (event.document.languageId !== "pawn") return;
+      const firstChangedLine = event.contentChanges.reduce(
+        (minimum, change) => Math.min(minimum, change.range.start.line),
+        Number.MAX_SAFE_INTEGER
+      );
+      pawnColorProvider.invalidateDocument(
+        event.document,
+        firstChangedLine === Number.MAX_SAFE_INTEGER ? 0 : firstChangedLine
+      );
+    }),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      if (document.languageId === "pawn") {
+        pawnColorProvider.closeDocument(document);
+      }
+    })
   );
 
   const performanceOutput = vscode.window.createOutputChannel("Pawn Performance");
