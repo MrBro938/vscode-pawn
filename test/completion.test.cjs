@@ -31,6 +31,7 @@ const cleanMainText = mainText.replace("|", "");
 const includeText = [
   "new G_TOTAL;",
   "new g_IncludeTotal;",
+  "new g_Precedence;",
   "#define INCLUDE_LIMIT 10",
   "enum E_INCLUDE_STATE { E_INCLUDE_ACTIVE, E_INCLUDE_DISABLED }",
   "stock IncludedFunction(value) {",
@@ -41,9 +42,12 @@ const includeText = [
 
 const mainAnalysis = analyzePawn(cleanMainText);
 const includeAnalysis = analyzePawn(includeText);
+const secondIncludeUri = "file:///workspace/dependencies/second.inc";
+const secondIncludeAnalysis = analyzePawn("new bool:g_Precedence;");
 const items = buildPawnCompletionItems(mainUri, cursorOffset, [
   { uri: mainUri, analysis: mainAnalysis },
-  { uri: includeUri, analysis: includeAnalysis }
+  { uri: includeUri, analysis: includeAnalysis },
+  { uri: secondIncludeUri, analysis: secondIncludeAnalysis }
 ]);
 const byName = new Map(items.map((item) => [item.label.toLowerCase(), item]));
 
@@ -70,6 +74,13 @@ assert.equal(
   "bool:localValue",
   "the innermost visible declaration should win when a local shadows an outer local"
 );
+assert.equal(
+  byName.get("g_precedence").detail,
+  "g_Precedence",
+  "the first resolved include should win when included libraries expose the same symbol"
+);
+assert.ok(byName.has("if"), "control-flow keywords should be suggested");
+assert.ok(byName.has("bool"), "Pawn tags and built-in types should be suggested");
 
 const nestedCall = 'Outer(first, Nested(1, 2), "text, with comma", values[1, 2], ';
 assert.deepEqual(
