@@ -79,6 +79,12 @@ import {
 import { resolveIncludeConfiguration } from "./includeConfig";
 import { PerformanceMonitor } from "../performance";
 import {
+  extractPawnColorDefineExpressions,
+  PawnColorDefine,
+  PawnColorDefineExpression,
+  resolvePawnColorDefines,
+} from "./colorDefines";
+import {
   createSemanticTokensProjectDependencySnapshot,
   getSemanticTokensDependencyInvalidationReason,
   resolveSemanticTokenSymbolKind,
@@ -353,6 +359,7 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
   indexedPawnPathIndex.delete(normalizePawnPath(filePath));
   configuredIncludeFileUris.delete(uri);
   indexedPawnTexts.delete(uri);
+  pawnColorDefineFileCache.delete(uri);
   indexedSymbolTexts.delete(uri);
   analysisCache.delete(uri);
   removeDocumentSymbols(uri);
@@ -1011,6 +1018,53 @@ const getFunctionSearchUris = (sourceUri: string): Set<string> => {
     )
   );
 };
+
+interface PawnColorDefineFileCacheEntry {
+  text: string;
+  definitions: PawnColorDefineExpression[];
+}
+
+// Keep lightweight #define parsing separate from full Pawn analysis. The large
+// gamemode is scanned only when its source text changes, not for every viewport
+// request or every color token.
+const pawnColorDefineFileCache = new Map<string, PawnColorDefineFileCacheEntry>();
+
+const getPawnColorDefines = (sourceUri: string): PawnColorDefine[] => {
+  const includedUris = getIncludedFileUris(sourceUri, includeGraph);
+  const orderedUris = Array.from(includedUris).filter((uri) => uri !== sourceUri);
+  // Prefer definitions in the current source over same-named include constants.
+  if (includedUris.has(sourceUri)) orderedUris.push(sourceUri);
+
+  const merged = new Map<string, PawnColorDefineExpression>();
+  orderedUris.forEach((uri) => {
+    const text = getDocumentText(uri);
+    if (text === undefined) return;
+
+    let cached = pawnColorDefineFileCache.get(uri);
+    if (!cached || cached.text !== text) {
+      cached = {
+        text,
+        definitions: extractPawnColorDefineExpressions(text),
+      };
+      pawnColorDefineFileCache.set(uri, cached);
+    }
+
+    cached.definitions.forEach((definition) => {
+      merged.set(definition.name.toLowerCase(), definition);
+    });
+  });
+
+  return resolvePawnColorDefines(Array.from(merged.values()));
+};
+
+connection.onRequest(
+  "pawn/colorDefines",
+  (params: { uri: string }) => {
+    if (!params || typeof params.uri !== "string") return [];
+    return getPawnColorDefines(params.uri);
+  }
+);
+
 
 const getWorkspaceAnalyses = (sourceUri?: string): WorkspacePawnAnalysis[] => {
   const uris = new Set<string>(indexedPawnFiles.keys());

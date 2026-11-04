@@ -144,6 +144,25 @@ const stringEnd = scanPawnColorLine(
 );
 assert.equal(stringEnd.colors.length, 1, "only code after a continued string should be decorated");
 
+const identifierScan = scanPawnColorLine(
+  'HUD_SendMessage(playerid, COLOR_GREY, COLOR_ALIAS); // COLOR_COMMENT'
+);
+assert.deepEqual(
+  identifierScan.identifiers.map((identifier) => identifier.name),
+  ["HUD_SendMessage", "playerid", "COLOR_GREY", "COLOR_ALIAS"],
+  "Pawn code identifiers should be collected without comment contents"
+);
+assert.equal(
+  scanPawnColorLine('printf("COLOR_GREY");').identifiers.length,
+  0,
+  "identifiers inside regular strings should not become color references"
+);
+assert.equal(
+  scanPawnColorLine("#define COLOR_GREY 0xAFAFAFAA").identifiers.length,
+  0,
+  "preprocessor definition names should not be decorated as references"
+);
+
 const invalidNumbers = scanPawnColorLine(
   "0x12345 0x1234567 0x123456789 identifier0xAABBCC 0xAABBCC_suffix"
 );

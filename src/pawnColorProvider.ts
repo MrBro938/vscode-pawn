@@ -5,6 +5,7 @@ import {
   PawnColorLineCache,
   scanPawnColorLine,
 } from "./pawnColorSupport";
+import type { PawnColorDefine } from "./server/colorDefines";
 
 const PREFETCH_MIN_LINES = 80;
 const PREFETCH_MAX_LINES = 240;
@@ -13,6 +14,29 @@ const MAX_CACHED_LINES_PER_DOCUMENT = 8192;
 
 export class PawnDocumentColorProvider implements vscode.DocumentColorProvider {
   private readonly documentCaches = new Map<string, PawnColorLineCache>();
+  private readonly colorDefinesByDocument = new Map<string, Map<string, PawnColorDefine>>();
+
+  setColorDefines(documentUri: string, defines: readonly PawnColorDefine[]): boolean {
+    const next = new Map<string, PawnColorDefine>();
+    defines.forEach((define) => next.set(define.name.toLowerCase(), define));
+    const previous = this.colorDefinesByDocument.get(documentUri);
+    if (previous && previous.size === next.size) {
+      let unchanged = true;
+      next.forEach((value, key) => {
+        const old = previous.get(key);
+        if (!old ||
+            old.red !== value.red ||
+            old.green !== value.green ||
+            old.blue !== value.blue ||
+            old.alpha !== value.alpha) {
+          unchanged = false;
+        }
+      });
+      if (unchanged) return false;
+    }
+    this.colorDefinesByDocument.set(documentUri, next);
+    return true;
+  }
 
   provideDocumentColors(
     document: vscode.TextDocument,
@@ -44,6 +68,7 @@ export class PawnDocumentColorProvider implements vscode.DocumentColorProvider {
     cache.setCoverage(scanRanges);
 
     const result: vscode.ColorInformation[] = [];
+    const colorDefines = this.colorDefinesByDocument.get(document.uri.toString());
     const emittedLines = new Set<number>();
 
     for (const range of scanRanges) {
@@ -99,6 +124,28 @@ export class PawnDocumentColorProvider implements vscode.DocumentColorProvider {
             )
           ));
         });
+
+        // Identifiers are collected only from Pawn code, never from comments,
+        // strings or #define directives. Resolve matching color constants using
+        // the current document's include-aware macro map.
+        lineScan.identifiers.forEach((identifier) => {
+          const define = colorDefines?.get(identifier.name.toLowerCase());
+          if (!define) return;
+          result.push(new vscode.ColorInformation(
+            new vscode.Range(
+              lineNumber,
+              identifier.startColumn,
+              lineNumber,
+              identifier.endColumn
+            ),
+            new vscode.Color(
+              define.red,
+              define.green,
+              define.blue,
+              define.alpha
+            )
+          ));
+        });
       }
     }
 
@@ -142,11 +189,14 @@ export class PawnDocumentColorProvider implements vscode.DocumentColorProvider {
   }
 
   closeDocument(document: vscode.TextDocument): void {
-    this.documentCaches.delete(document.uri.toString());
+    const uri = document.uri.toString();
+    this.documentCaches.delete(uri);
+    this.colorDefinesByDocument.delete(uri);
   }
 
   dispose(): void {
     this.documentCaches.clear();
+    this.colorDefinesByDocument.clear();
   }
 
   private getCache(document: vscode.TextDocument): PawnColorLineCache {

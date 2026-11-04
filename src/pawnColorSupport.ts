@@ -7,8 +7,15 @@ export interface PawnColorLiteral {
   alpha: number;
 }
 
+export interface PawnColorIdentifier {
+  name: string;
+  startColumn: number;
+  endColumn: number;
+}
+
 export interface PawnColorLineScan {
   colors: PawnColorLiteral[];
+  identifiers: PawnColorIdentifier[];
   inBlockComment: boolean;
   continuedQuote?: "\"" | "'";
 }
@@ -27,6 +34,9 @@ export interface PawnColorValue {
 
 const isIdentifierCharacter = (value: string | undefined): boolean =>
   value !== undefined && /[A-Za-z0-9_@]/.test(value);
+
+const isIdentifierStart = (value: string | undefined): boolean =>
+  value !== undefined && /[A-Za-z_@]/.test(value);
 
 const isHexCharacter = (value: string | undefined): boolean =>
   value !== undefined && /[0-9A-Fa-f]/.test(value);
@@ -52,6 +62,8 @@ export const scanPawnColorLine = (
   continuesQuote?: "\"" | "'"
 ): PawnColorLineScan => {
   const colors: PawnColorLiteral[] = [];
+  const identifiers: PawnColorIdentifier[] = [];
+  const isPreprocessorLine = /^\s*#/.test(line);
   let inBlockComment = startsInBlockComment;
   let quote: "\"" | "'" | undefined = continuesQuote;
   let escaped = false;
@@ -120,6 +132,19 @@ export const scanPawnColorLine = (
       continue;
     }
 
+    if (isIdentifierStart(current)) {
+      const start = index++;
+      while (isIdentifierCharacter(line[index])) index++;
+      if (!isPreprocessorLine) {
+        identifiers.push({
+          name: line.slice(start, index),
+          startColumn: start,
+          endColumn: index,
+        });
+      }
+      continue;
+    }
+
     if (
       current !== "0" ||
       (next !== "x" && next !== "X") ||
@@ -156,6 +181,7 @@ export const scanPawnColorLine = (
 
   return {
     colors,
+    identifiers,
     inBlockComment,
     continuedQuote: quote && hasUnescapedTrailingBackslash(line)
       ? quote

@@ -9,9 +9,11 @@ import {
   formatPerformanceSnapshot,
 } from "./performance";
 import { PawnDocumentColorProvider } from "./pawnColorProvider";
+import type { PawnColorDefine } from "./server/colorDefines";
 
 let client: LanguageClient;
 let clientReady = false;
+let refreshPawnColorDefinesFromIndex: (() => void) | undefined;
 const performanceStats = new PerformanceMonitor();
 
 const pawnGlob = "**/*.{p,pwn,pawn,inc}";
@@ -68,6 +70,7 @@ const flushExternalFileEvents = async () => {
 
   if (deleted.length > 0 || files.length > 0) {
     await client.sendNotification("pawn/indexFiles", { files, deleted });
+    refreshPawnColorDefinesFromIndex?.();
   }
 };
 
@@ -250,6 +253,7 @@ export async function activate(context: vscode.ExtensionContext) {
     pawnColorProvider
   );
   let pawnColorRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let pawnColorDefineRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
   const schedulePawnColorRefresh = () => {
     if (pawnColorRefreshTimer) clearTimeout(pawnColorRefreshTimer);
@@ -272,10 +276,51 @@ export async function activate(context: vscode.ExtensionContext) {
     schedulePawnColorRefresh();
   };
 
+  const refreshPawnColorDefines = async () => {
+    if (!clientReady) return;
+    const visibleDocuments = new Map<string, vscode.TextDocument>();
+    vscode.window.visibleTextEditors.forEach((editor) => {
+      if (editor.document.languageId === "pawn") {
+        visibleDocuments.set(editor.document.uri.toString(), editor.document);
+      }
+    });
+    const activeDocument = vscode.window.activeTextEditor?.document;
+    if (activeDocument?.languageId === "pawn") {
+      visibleDocuments.set(activeDocument.uri.toString(), activeDocument);
+    }
+
+    let changed = false;
+    await Promise.all(Array.from(visibleDocuments.keys()).map(async (uri) => {
+      try {
+        const defines = await client.sendRequest<PawnColorDefine[]>(
+          "pawn/colorDefines",
+          { uri }
+        );
+        if (pawnColorProvider.setColorDefines(uri, defines || [])) changed = true;
+      } catch (error) {
+        console.warn("[Pawn Tools] Could not resolve color #define values", error);
+      }
+    }));
+
+    if (changed) schedulePawnColorRefresh();
+  };
+
+  const schedulePawnColorDefineRefresh = () => {
+    if (pawnColorDefineRefreshTimer) clearTimeout(pawnColorDefineRefreshTimer);
+    pawnColorDefineRefreshTimer = setTimeout(() => {
+      pawnColorDefineRefreshTimer = undefined;
+      void refreshPawnColorDefines();
+    }, 350);
+  };
+  refreshPawnColorDefinesFromIndex = schedulePawnColorDefineRefresh;
+
   context.subscriptions.push(
     new vscode.Disposable(() => {
       if (pawnColorRefreshTimer) clearTimeout(pawnColorRefreshTimer);
+      if (pawnColorDefineRefreshTimer) clearTimeout(pawnColorDefineRefreshTimer);
       pawnColorRefreshTimer = undefined;
+      pawnColorDefineRefreshTimer = undefined;
+      refreshPawnColorDefinesFromIndex = undefined;
       pawnColorProviderRegistration.dispose();
       pawnColorProvider.dispose();
     }),
@@ -284,9 +329,11 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.window.onDidChangeVisibleTextEditors((editors) => {
       editors.forEach(updatePawnColorViewport);
+      schedulePawnColorDefineRefresh();
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       updatePawnColorViewport(editor);
+      schedulePawnColorDefineRefresh();
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
       if (event.document.languageId !== "pawn") return;
@@ -298,6 +345,7 @@ export async function activate(context: vscode.ExtensionContext) {
         event.document,
         firstChangedLine === Number.MAX_SAFE_INTEGER ? 0 : firstChangedLine
       );
+      schedulePawnColorDefineRefresh();
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {
       if (document.languageId === "pawn") {
@@ -410,13 +458,17 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
 
   const watcher = vscode.workspace.createFileSystemWatcher(pawnGlob);
-  watcher.onDidCreate(readAndIndexFile);
-  watcher.onDidChange(readAndIndexFile);
+  watcher.onDidCreate((uri) => {
+    void readAndIndexFile(uri).then(schedulePawnColorDefineRefresh);
+  });
+  watcher.onDidChange((uri) => {
+    void readAndIndexFile(uri).then(schedulePawnColorDefineRefresh);
+  });
   watcher.onDidDelete((uri) => {
     if (clientReady) {
-      client.sendNotification("pawn/indexFiles", {
+      void client.sendNotification("pawn/indexFiles", {
         deleted: [uri.toString()],
-      });
+      }).then(schedulePawnColorDefineRefresh);
     }
   });
   context.subscriptions.push(watcher);
@@ -488,6 +540,7 @@ export async function activate(context: vscode.ExtensionContext) {
       "startup.includeConfiguration",
       sendIncludeConfiguration
     );
+    await refreshPawnColorDefines();
     performanceStats.record(
       "startup.postClientInitialization",
       performance.now() - startupStartedAt
