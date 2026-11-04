@@ -83,7 +83,6 @@ try {
     "include",
     "src/includes",
     "build/includes",
-    "builds/release/includes",
     "args/includes",
     "custom/includes",
     "pawno/include",
@@ -99,6 +98,38 @@ try {
       "include configuration should contain " + directory
     );
   });
+
+  const ordered = result.includeDirectories.map((directory) => path.resolve(directory));
+  const positionOf = (relative) => ordered.indexOf(path.resolve(temporaryRoot, relative));
+
+  assert.ok(
+    positionOf("pawno/cfg/includes") < positionOf("build/includes"),
+    "pawn.cfg -i paths should be searched before explicit sampctl build includes"
+  );
+  assert.ok(
+    positionOf("build/includes") < positionOf("args/includes"),
+    "build.includes should retain its order before -i options in build.args"
+  );
+  assert.ok(
+    positionOf("args/includes") < positionOf("dependencies/samp-stdlib"),
+    "explicit build includes should take precedence over dependencies"
+  );
+  assert.ok(
+    positionOf("dependencies/samp-stdlib") < positionOf("dependencies/YSI-Includes/include"),
+    "dependency include paths should follow the dependencies array order"
+  );
+  assert.ok(
+    positionOf("dependencies/YSI-Includes/include") < positionOf("pawno/include"),
+    "compiler-standard includes should be searched after explicit dependency paths"
+  );
+  assert.ok(
+    positionOf("custom/includes") > positionOf("pawno/include"),
+    "extension custom include paths should be appended as additional fallbacks"
+  );
+  assert.ok(
+    !directories.has(path.join(temporaryRoot, "builds/release/includes")),
+    "only the default build configuration should determine the active include order"
+  );
 
   assert.ok(
     result.compilerDirectories.some((directory) =>
