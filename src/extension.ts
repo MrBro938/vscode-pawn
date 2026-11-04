@@ -263,7 +263,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(watcher);
 
   const configWatcher = vscode.workspace.createFileSystemWatcher(
-    "**/{pawn.json,pawn.cfg}"
+    "**/{pawn.json,pawn.yaml,pawn.cfg}"
   );
   configWatcher.onDidCreate(() => void sendIncludeConfiguration());
   configWatcher.onDidChange(() => void sendIncludeConfiguration());
