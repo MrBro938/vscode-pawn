@@ -152,10 +152,10 @@ assert.deepEqual(
   ["HUD_SendMessage", "playerid", "COLOR_GREY", "COLOR_ALIAS"],
   "Pawn code identifiers should be collected without comment contents"
 );
-assert.equal(
-  scanPawnColorLine('printf("COLOR_GREY");').identifiers.length,
-  0,
-  "identifiers inside regular strings should not become color references"
+assert.deepEqual(
+  scanPawnColorLine('printf("COLOR_GREY");').identifiers.map((identifier) => identifier.name),
+  ["printf"],
+  "identifiers inside regular strings should be ignored while code identifiers remain available"
 );
 assert.equal(
   scanPawnColorLine("#define COLOR_GREY 0xAFAFAFAA").identifiers.length,
