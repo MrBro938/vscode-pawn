@@ -1288,7 +1288,7 @@ const doSignHelp = (
     document.uri,
     result.identifier
   );
-  const snip = getFunctionInCompilationUnit(document.uri, result.identifier);
+  const snip = getFunctionInSearchScope(document.uri, result.identifier);
   if (!resolved && !snip) return undefined;
 
   const macroSignature = resolved?.symbol.kind === "macro"
@@ -1413,10 +1413,10 @@ const doGoToDef = (document: TextDocument, position: Position) => {
   const content = document.getText();
   const cursorIndex = positionToIndex(content, position);
   const result = findIdentifierAtCursor(content, cursorIndex);
-  const functionSymbol = getFunctionInCompilationUnit(document.uri, result.identifier);
+  const functionSymbol = getFunctionInSearchScope(document.uri, result.identifier);
   if (functionSymbol) return functionSymbol.definition;
 
-  const definition = getDefinitionInCompilationUnit(document.uri, result.identifier);
+  const definition = getDefinitionInSearchScope(document.uri, result.identifier);
   if (definition) return definition.definition;
 
   return undefined;
