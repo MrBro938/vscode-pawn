@@ -366,7 +366,7 @@ for (let index = 0; index < 250; index++) {
     `stock StressFunction${index}(playerid, Float:value) { new local${index} = value; return local${index}; }`
   );
 }
-const repeatedAnalysis = analyzePawn(repeatedDeclarations.join("\\n"));
+const repeatedAnalysis = analyzePawn(repeatedDeclarations.join(String.fromCharCode(10)));
 assert.equal(
   repeatedAnalysis.symbols.filter((symbol) => symbol.kind === "function" && symbol.name.startsWith("StressFunction")).length,
   250,
@@ -387,10 +387,10 @@ const lineDocumentedMacros = analyzePawn([
   " * block documentation",
   " */",
   "#define DOCUMENTED_BLOCK 2"
-].join("\\n"));
+].join(String.fromCharCode(10)));
 assert.equal(
   lineDocumentedMacros.symbols.find((symbol) => symbol.name === "DOCUMENTED_LINE")?.documentation,
-  "first line\\nsecond line",
+  ["first line", "second line"].join(String.fromCharCode(10)),
   "adjacent line comments should remain macro documentation"
 );
 assert.equal(
