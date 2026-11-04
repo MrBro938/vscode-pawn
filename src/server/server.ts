@@ -52,6 +52,7 @@ import {
   resolveIncludeUris,
   getIncludedFileUris,
   extractPawnIncludes,
+  updatePawnIncludeGraph,
   normalizePawnPath,
   PawnIncludeMode,
 } from "./includeGraph";
@@ -261,6 +262,12 @@ const reloadConfiguredIncludes = () => {
 
   rebuildIncludeGraph();
   completionCache.clear();
+
+  // Let the extension host watch external dependency folders without having
+  // to duplicate pawn.json / pawn.cfg parsing on the client side.
+  connection.sendNotification("pawn/includeDirectories", {
+    directories: configuredIncludeDirectories,
+  });
 };
 
 documents.listen(connection);
@@ -371,6 +378,21 @@ documents.onDidClose((event) => {
   // still part of the workspace, and re-opening it should not force a reparse.
 });
 
+const getIndexedUrisUnderPath = (uri: string): string[] => {
+  try {
+    const targetPath = path.resolve(fileURLToPath(uri));
+    return Array.from(indexedPawnFiles.entries())
+      .filter(([, indexedPath]) => {
+        const relativePath = path.relative(targetPath, indexedPath);
+        return relativePath === "" ||
+          (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+      })
+      .map(([indexedUri]) => indexedUri);
+  } catch {
+    return indexedPawnFiles.has(uri) ? [uri] : [];
+  }
+};
+
 connection.onNotification(
   "pawn/indexFiles",
   (params: {
@@ -378,22 +400,67 @@ connection.onNotification(
     deleted?: string[];
     deferGraphRebuild?: boolean;
   }) => {
-    if (params.deleted) {
-      params.deleted.forEach((uri) => {
-        unindexPawnFile(uri, false);
-      });
-    }
+    let needsFullGraphRebuild = false;
+    let hasIndexChanges = false;
+    const changedIncludeSources = new Set<string>();
 
-    if (params.files) {
-      params.files.forEach((file) => {
-        indexPawnFile(file.uri, file.text, false);
+    params.deleted?.forEach((deletedUri) => {
+      // A filesystem watcher may report a deleted directory instead of each
+      // child file. Remove both an exact file and any indexed descendants.
+      const targets = getIndexedUrisUnderPath(deletedUri);
+      targets.forEach((targetUri) => {
+        if (!indexedPawnFiles.has(targetUri)) return;
+        unindexPawnFile(targetUri, false);
+        needsFullGraphRebuild = true;
+        hasIndexChanges = true;
       });
-    }
+    });
 
-    if ((params.deleted && params.deleted.length > 0) ||
-        (params.files && params.files.length > 0)) {
-      if (!params.deferGraphRebuild) rebuildIncludeGraph();
+    params.files?.forEach((file) => {
+      const wasIndexed = indexedPawnFiles.has(file.uri);
+      const previousText = indexedPawnTexts.get(file.uri);
+      const textChanged = previousText !== file.text;
+      const includeDirectivesChanged = previousText !== undefined &&
+        JSON.stringify(extractPawnIncludes(previousText)) !==
+          JSON.stringify(extractPawnIncludes(file.text));
+
+      indexPawnFile(file.uri, file.text, false);
+
+      if (!wasIndexed) {
+        // A newly created include can satisfy previously unresolved directives.
+        needsFullGraphRebuild = true;
+        hasIndexChanges = true;
+      } else if (textChanged) {
+        hasIndexChanges = true;
+        if (includeDirectivesChanged || previousText === undefined) {
+          changedIncludeSources.add(file.uri);
+        }
+      }
+    });
+
+    if (hasIndexChanges) {
+      if (!params.deferGraphRebuild) {
+        if (needsFullGraphRebuild) {
+          rebuildIncludeGraph();
+        } else {
+          changedIncludeSources.forEach((uri) => {
+            includeGraph = updatePawnIncludeGraph(
+              includeGraph,
+              uri,
+              indexedPawnFiles,
+              indexedPawnTexts,
+              includePathIndex,
+              configuredIncludeDirectories,
+              indexedPawnPathIndex
+            );
+          });
+        }
+      }
+
       completionCache.clear();
+      if (semanticTokensRefreshSupported) {
+        void connection.languages.semanticTokens.refresh();
+      }
     }
   }
 );
