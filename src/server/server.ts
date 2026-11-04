@@ -92,14 +92,29 @@ let semanticTokensRefreshSupported = false;
 
 interface SemanticTokensCacheEntry {
   analysis: PawnAnalysis;
-  includedAnalyses: PawnAnalysis[];
+  generation: number;
   result: ReturnType<SemanticTokensBuilder["build"]>;
 }
 
-// Keep a small LRU of recently requested document ranges. Range results are
-// much smaller than full-document token arrays, but still bounded in memory.
+interface SemanticTokensContext {
+  analysis: PawnAnalysis;
+  generation: number;
+  projectKinds: Map<string, PawnSymbol["kind"]>;
+  localSymbolsByName: Map<string, PawnSymbol[]>;
+  declarations: Map<number, PawnSymbol>;
+}
+
+// The generation changes whenever a Pawn source, cached analysis or include
+// graph changes. This lets cached range responses validate in O(1) without
+// walking every include on each editor request.
+let semanticTokensGeneration = 0;
+
+// Keep a small LRU of range responses plus one symbol-resolution context per
+// recently used document. The context is shared by all visible ranges.
 const semanticTokensCache = new Map<string, SemanticTokensCacheEntry>();
 const MAX_SEMANTIC_TOKEN_CACHE_ENTRIES = 24;
+const semanticTokensContextCache = new Map<string, SemanticTokensContext>();
+const MAX_SEMANTIC_TOKEN_CONTEXTS = 2;
 
 // Workspace include index. Each path suffix points to all matching files,
 // allowing includes to resolve independently of the including file's directory.
@@ -125,6 +140,7 @@ const setFunctionSearchScope = (scope?: string) => {
 const rebuildIncludeGraph = () => performanceStats.measure(
   "include.graphRebuild",
   () => {
+    semanticTokensGeneration++;
     includeGraph = buildPawnIncludeGraph(
       indexedPawnFiles,
       indexedPawnTexts,
@@ -155,6 +171,7 @@ const indexPawnFile = (uri: string, text?: string, rebuildGraph = true) => {
     );
 
     if (textChanged) {
+      semanticTokensGeneration++;
       indexedSymbolTexts.delete(uri);
       analysisCache.delete(uri);
       removeDocumentSymbols(uri);
@@ -215,6 +232,7 @@ const unindexPawnFile = (uri: string, rebuildGraph = true) => {
   const filePath = indexedPawnFiles.get(uri);
   if (!filePath) return;
 
+  semanticTokensGeneration++;
   indexedPawnFiles.delete(uri);
   indexedPawnPathIndex.delete(normalizePawnPath(filePath));
   configuredIncludeFileUris.delete(uri);
@@ -414,12 +432,13 @@ const collectSymbols = (textDocument: TextDocument) => {
     performanceStats.measure("analysis.parseDefinitions", () => parseDefinitions(textDocument));
     performanceStats.measure("analysis.parseFunctions", () => parseFunctions(textDocument));
     const cachedAnalysis = analysisCache.get(textDocument.uri);
-    analysisCache.set(textDocument.uri, {
-      text,
-      analysis: cachedAnalysis?.text === text
-        ? cachedAnalysis.analysis
-        : analyzePawnMeasured(textDocument.uri, text),
-    });
+    const analysis = cachedAnalysis?.text === text
+      ? cachedAnalysis.analysis
+      : (() => {
+          semanticTokensGeneration++;
+          return analyzePawnMeasured(textDocument.uri, text);
+        })();
+    analysisCache.set(textDocument.uri, { text, analysis });
     indexedSymbolTexts.set(textDocument.uri, text);
   });
 };
@@ -758,6 +777,7 @@ const getAnalysis = (uri: string): PawnAnalysis | undefined => {
   }
 
   performanceStats.count("analysis.cacheMisses");
+  semanticTokensGeneration++;
   const analysis = analyzePawnMeasured(uri, text);
   analysisCache.set(uri, { text, analysis });
   return analysis;
@@ -924,96 +944,123 @@ connection.languages.semanticTokens.onRange((params) =>
   if (!analysis) return { data: [] };
 
   const cacheKey = `${document.uri}:${rangeStart}:${rangeEnd}`;
-
-  // Semantic coloring only needs declarations from this file and the
-  // files it actually includes. Walking the full compilation unit also pulls
-  // in every sibling module and can expand to thousands of YSI files.
-  const includedUris = performanceStats.measure(
-    "semanticTokens.includeClosure",
-    () => getIncludedFileUris(document.uri, includeGraph)
-  );
-  performanceStats.count("semanticTokens.includeFiles", includedUris.size);
-
-  const workspace: WorkspacePawnAnalysis[] = [];
-  performanceStats.measure("semanticTokens.analysisPreparation", () => {
-    includedUris.forEach((uri) => {
-      performanceStats.count("semanticTokens.filesVisited");
-      const before = analysisCache.get(uri);
-      const text = getDocumentText(uri);
-      if (text !== undefined && (!before || before.text !== text)) {
-        performanceStats.count("semanticTokens.filesParsedOnDemand");
-      }
-      const includedAnalysis = performanceStats.measure(
-        "semanticTokens.getAnalysis",
-        () => getAnalysis(uri)
-      );
-      if (includedAnalysis) workspace.push({ uri, analysis: includedAnalysis });
-    });
-  });
   const cachedTokens = semanticTokensCache.get(cacheKey);
   if (
     cachedTokens &&
     cachedTokens.analysis === analysis &&
-    cachedTokens.includedAnalyses.length === workspace.length &&
-    workspace.every((entry, index) =>
-      entry.analysis === cachedTokens.includedAnalyses[index]
-    )
+    cachedTokens.generation === semanticTokensGeneration
   ) {
     performanceStats.count("semanticTokens.cacheHits");
-    // Refresh insertion order so the most recently used ranges survive.
     semanticTokensCache.delete(cacheKey);
     semanticTokensCache.set(cacheKey, cachedTokens);
     return cachedTokens.result;
   }
+  if (cachedTokens) semanticTokensCache.delete(cacheKey);
   performanceStats.count("semanticTokens.cacheMisses");
 
-  performanceStats.count("semanticTokens.sourceSymbols", workspace.reduce(
-    (total, entry) => total + entry.analysis.symbols.length,
-    0
-  ));
+  let context = semanticTokensContextCache.get(document.uri);
+  if (
+    !context ||
+    context.analysis !== analysis ||
+    context.generation !== semanticTokensGeneration
+  ) {
+    performanceStats.count("semanticTokens.contextCacheMisses");
 
-  const projectKinds = performanceStats.measure(
-    "semanticTokens.projectSymbolIndex",
-    () => {
-      const index = new Map<string, PawnSymbol["kind"]>();
-      workspace.forEach((entry) => {
-        entry.analysis.symbols.forEach((symbol) => {
-          if (!index.has(symbol.name) ||
-              symbol.kind === "function" ||
-              symbol.kind === "macro" ||
-              symbol.kind === "enum" ||
-              symbol.kind === "enumMember" ||
-              symbol.kind === "type") {
-            index.set(symbol.name, symbol.kind);
-          }
+    // Only rebuild the include workspace and symbol indexes after a real
+    // source/analysis/graph change. Scrolling through a file reuses this context.
+    const includedUris = performanceStats.measure(
+      "semanticTokens.includeClosure",
+      () => getIncludedFileUris(document.uri, includeGraph)
+    );
+    performanceStats.count("semanticTokens.includeFiles", includedUris.size);
+
+    const workspace: WorkspacePawnAnalysis[] = [];
+    performanceStats.measure("semanticTokens.analysisPreparation", () => {
+      includedUris.forEach((uri) => {
+        performanceStats.count("semanticTokens.filesVisited");
+        const before = analysisCache.get(uri);
+        const text = getDocumentText(uri);
+        if (text !== undefined && (!before || before.text !== text)) {
+          performanceStats.count("semanticTokens.filesParsedOnDemand");
+        }
+        const includedAnalysis = performanceStats.measure(
+          "semanticTokens.getAnalysis",
+          () => getAnalysis(uri)
+        );
+        if (includedAnalysis) workspace.push({ uri, analysis: includedAnalysis });
+      });
+    });
+    performanceStats.count("semanticTokens.sourceSymbols", workspace.reduce(
+      (total, entry) => total + entry.analysis.symbols.length,
+      0
+    ));
+
+    const projectKinds = performanceStats.measure(
+      "semanticTokens.projectSymbolIndex",
+      () => {
+        const index = new Map<string, PawnSymbol["kind"]>();
+        workspace.forEach((entry) => {
+          entry.analysis.symbols.forEach((symbol) => {
+            if (!index.has(symbol.name) ||
+                symbol.kind === "function" ||
+                symbol.kind === "macro" ||
+                symbol.kind === "enum" ||
+                symbol.kind === "enumMember" ||
+                symbol.kind === "type") {
+              index.set(symbol.name, symbol.kind);
+            }
+          });
         });
-      });
-      return index;
-    }
-  );
+        return index;
+      }
+    );
 
-  const localSymbolsByName = performanceStats.measure(
-    "semanticTokens.localSymbolIndex",
-    () => {
-      const index = new Map<string, PawnSymbol[]>();
-      analysis.symbols.forEach((symbol) => {
-        if (symbol.kind !== "local" && symbol.kind !== "parameter") return;
-        const matches = index.get(symbol.name) || [];
-        matches.push(symbol);
-        index.set(symbol.name, matches);
-      });
-      // Keep the most recently declared candidate first so resolving a local
-      // identifier does not filter and sort the complete symbol list each time.
-      index.forEach((matches) =>
-        matches.sort((left, right) => right.start - left.start)
-      );
-      return index;
+    const localSymbolsByName = performanceStats.measure(
+      "semanticTokens.localSymbolIndex",
+      () => {
+        const index = new Map<string, PawnSymbol[]>();
+        analysis.symbols.forEach((symbol) => {
+          if (symbol.kind !== "local" && symbol.kind !== "parameter") return;
+          const matches = index.get(symbol.name) || [];
+          matches.push(symbol);
+          index.set(symbol.name, matches);
+        });
+        // Keep the most recently declared candidate first so resolving a local
+        // identifier does not filter and sort the complete symbol list per token.
+        index.forEach((matches) =>
+          matches.sort((left, right) => right.start - left.start)
+        );
+        return index;
+      }
+    );
+
+    const declarations = new Map<number, PawnSymbol>();
+    analysis.symbols.forEach((symbol) => declarations.set(symbol.start, symbol));
+
+    context = {
+      analysis,
+      generation: semanticTokensGeneration,
+      projectKinds,
+      localSymbolsByName,
+      declarations,
+    };
+    semanticTokensContextCache.delete(document.uri);
+    semanticTokensContextCache.set(document.uri, context);
+    while (semanticTokensContextCache.size > MAX_SEMANTIC_TOKEN_CONTEXTS) {
+      const oldestUri = semanticTokensContextCache.keys().next().value;
+      if (oldestUri === undefined) break;
+      semanticTokensContextCache.delete(oldestUri);
     }
-  );
+  } else {
+    performanceStats.count("semanticTokens.contextCacheHits");
+    semanticTokensContextCache.delete(document.uri);
+    semanticTokensContextCache.set(document.uri, context);
+  }
+
+  const { projectKinds, localSymbolsByName, declarations } = context;
 
   // Token arrays are ordered by source offset. Binary-search the requested
-  // range so classification and line/character conversion touch visible tokens
-  // only, even when the main Pawn file contains hundreds of thousands of tokens.
+  // range so only visible tokens are classified.
   let low = 0;
   let high = analysis.tokens.length;
   while (low < high) {
@@ -1047,79 +1094,76 @@ connection.languages.semanticTokens.onRange((params) =>
     }
   }
 
-  const declarations = new Map<number, PawnSymbol>();
-  analysis.symbols.forEach((symbol) => declarations.set(symbol.start, symbol));
-
   const tokenTypes = semanticLegend.tokenTypes;
   const tokenTypeIndex = new Map(tokenTypes.map((type, index) => [type, index]));
   const builder = new SemanticTokensBuilder();
 
   let processedTokenCount = 0;
   performanceStats.measure("semanticTokens.classifyTokens", () => {
-  for (let tokenIndex = firstTokenIndex; tokenIndex < endTokenIndex; tokenIndex++) {
-    const token = analysis.tokens[tokenIndex];
-    processedTokenCount++;
-    let tokenType: string | undefined;
-    let isDeclaration = false;
+    for (let tokenIndex = firstTokenIndex; tokenIndex < endTokenIndex; tokenIndex++) {
+      const token = analysis.tokens[tokenIndex];
+      processedTokenCount++;
+      let tokenType: string | undefined;
+      let isDeclaration = false;
 
-    if (token.kind === "comment") tokenType = "comment";
-    else if (token.kind === "string") tokenType = "string";
-    else if (token.kind === "number") tokenType = "number";
-    else if (token.kind === "identifier") {
-      const normalized = token.value.toLowerCase();
-      const declaration = declarations.get(token.start);
+      if (token.kind === "comment") tokenType = "comment";
+      else if (token.kind === "string") tokenType = "string";
+      else if (token.kind === "number") tokenType = "number";
+      else if (token.kind === "identifier") {
+        const normalized = token.value.toLowerCase();
+        const declaration = declarations.get(token.start);
 
-      if (declaration) {
-        isDeclaration = true;
-        switch (declaration.kind) {
-          case "function": tokenType = "function"; break;
-          case "macro": tokenType = "macro"; break;
-          case "parameter": tokenType = "parameter"; break;
-          case "enum": tokenType = "enum"; break;
-          case "enumMember": tokenType = "enumMember"; break;
-          case "type": tokenType = "type"; break;
-          default: tokenType = "variable"; break;
+        if (declaration) {
+          isDeclaration = true;
+          switch (declaration.kind) {
+            case "function": tokenType = "function"; break;
+            case "macro": tokenType = "macro"; break;
+            case "parameter": tokenType = "parameter"; break;
+            case "enum": tokenType = "enum"; break;
+            case "enumMember": tokenType = "enumMember"; break;
+            case "type": tokenType = "type"; break;
+            default: tokenType = "variable"; break;
+          }
+        } else if (pawnKeywords.has(normalized)) {
+          tokenType = "keyword";
+        } else if (typeAnnotationStarts.has(token.start)) {
+          tokenType = "type";
+        } else {
+          const local = localSymbolsByName.get(token.value)?.find((symbol) =>
+            token.start >= symbol.scopeStart &&
+            token.start <= symbol.scopeEnd &&
+            symbol.start <= token.start
+          );
+
+          const kind = local?.kind || projectKinds.get(token.value);
+          if (kind === "function") tokenType = "function";
+          else if (kind === "macro") tokenType = "macro";
+          else if (kind === "parameter") tokenType = "parameter";
+          else if (kind === "enum") tokenType = "enum";
+          else if (kind === "enumMember") tokenType = "enumMember";
+          else if (kind === "type") tokenType = "type";
+          else if (kind !== undefined) tokenType = "variable";
+          else if (isPawnFunctionInvocation(analysis.tokens, tokenIndex)) {
+            // Highlight calls even when their native declaration is only visible
+            // through the parent gamemode's includes, not this module's closure.
+            tokenType = "function";
+          } else tokenType = "variable";
         }
-      } else if (pawnKeywords.has(normalized)) {
-        tokenType = "keyword";
-      } else if (typeAnnotationStarts.has(token.start)) {
-        tokenType = "type";
-      } else {
-        const local = localSymbolsByName.get(token.value)?.find((symbol) =>
-          token.start >= symbol.scopeStart &&
-          token.start <= symbol.scopeEnd &&
-          symbol.start <= token.start
-        );
-
-        const kind = local?.kind || projectKinds.get(token.value);
-        if (kind === "function") tokenType = "function";
-        else if (kind === "macro") tokenType = "macro";
-        else if (kind === "parameter") tokenType = "parameter";
-        else if (kind === "enum") tokenType = "enum";
-        else if (kind === "enumMember") tokenType = "enumMember";
-        else if (kind === "type") tokenType = "type";
-        else if (kind !== undefined) tokenType = "variable";
-        else if (isPawnFunctionInvocation(analysis.tokens, tokenIndex)) {
-          // Highlight calls even when their native declaration is only visible
-          // through the parent gamemode's includes, not this module's closure.
-          tokenType = "function";
-        } else tokenType = "variable";
       }
+
+      if (!tokenType) continue;
+      const typeIndex = tokenTypeIndex.get(tokenType);
+      if (typeIndex === undefined) continue;
+
+      const position = document.positionAt(token.start);
+      builder.push(
+        position.line,
+        position.character,
+        token.end - token.start,
+        typeIndex,
+        isDeclaration ? 1 : 0
+      );
     }
-
-    if (!tokenType) return;
-    const typeIndex = tokenTypeIndex.get(tokenType);
-    if (typeIndex === undefined) return;
-
-    const position = document.positionAt(token.start);
-    builder.push(
-      position.line,
-      position.character,
-      token.end - token.start,
-      typeIndex,
-      isDeclaration ? 1 : 0
-    );
-  }
   });
 
   const result = builder.build();
@@ -1129,7 +1173,7 @@ connection.languages.semanticTokens.onRange((params) =>
   semanticTokensCache.delete(cacheKey);
   semanticTokensCache.set(cacheKey, {
     analysis,
-    includedAnalyses: workspace.map((entry) => entry.analysis),
+    generation: semanticTokensGeneration,
     result,
   });
   while (semanticTokensCache.size > MAX_SEMANTIC_TOKEN_CACHE_ENTRIES) {
