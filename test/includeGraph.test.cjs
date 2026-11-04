@@ -6,7 +6,8 @@ const {
   extractPawnIncludes,
   getCompilationUnitUris,
   getIncludedFileUris,
-  resolveIncludeUris
+  resolveIncludeUris,
+  updatePawnIncludeGraph
 } = require("../out/server/includeGraph.js");
 
 const rootA = "file:///workspace/gamemodes/mode_a.pwn";
@@ -96,6 +97,27 @@ assert.equal(
   getIncludedFileUris(apiA, graph),
   includedApiA,
   "included-file traversal should be cached for repeated requests"
+);
+
+const changedTexts = new Map(texts);
+changedTexts.set(apiA, '#include "../private/side.inc"');
+const updatedGraph = updatePawnIncludeGraph(
+  graph,
+  apiA,
+  files,
+  changedTexts,
+  pathIndex,
+  ["/workspace"]
+);
+assert.deepEqual(
+  Array.from(updatedGraph.get(apiA) || []),
+  [sideA],
+  "incremental graph update should replace edges for the edited include file"
+);
+assert.deepEqual(
+  Array.from(graph.get(apiA) || []),
+  [common],
+  "incremental graph update must not mutate the previous graph snapshot"
 );
 
 for (const uri of [rootA, apiA, sideA, common]) {
