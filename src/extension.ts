@@ -1,10 +1,17 @@
 import { isAbsolute, join, relative, resolve } from "path";
 import { readFile } from "fs";
 import * as vscode from "vscode";
+import { performance } from "perf_hooks";
 import { LanguageClient, ServerOptions, TransportKind } from "vscode-languageclient/node";
+import {
+  PerformanceMonitor,
+  PerformanceSnapshot,
+  formatPerformanceSnapshot,
+} from "./performance";
 
 let client: LanguageClient;
 let clientReady = false;
+const performanceStats = new PerformanceMonitor();
 
 const pawnGlob = "**/*.{p,pwn,pawn,inc}";
 const excludedGlob = "**/{.git,node_modules,.vscode-test,dist,out}/**";
@@ -155,7 +162,11 @@ const readAndIndexFile = async (uri: vscode.Uri, force = false) => {
 };
 
 const indexWorkspaceFiles = async () => {
-  const files = await vscode.workspace.findFiles(pawnGlob, excludedGlob);
+  const files = await performanceStats.measureAsync(
+    "workspace.scan",
+    () => vscode.workspace.findFiles(pawnGlob, excludedGlob)
+  );
+  performanceStats.count("workspace.filesFound", files.length);
 
   for (let offset = 0; offset < files.length; offset += INDEX_BATCH_SIZE) {
     const batch = files
@@ -165,12 +176,18 @@ const indexWorkspaceFiles = async () => {
     const indexedFiles = await Promise.all(
       batch.map(async (uri) => {
         try {
-          const bytes = await readFileBytes(uri);
+          const bytes = await performanceStats.measureAsync(
+            "workspace.fileRead",
+            () => readFileBytes(uri)
+          );
+          performanceStats.count("workspace.filesRead");
+          performanceStats.count("workspace.bytesRead", bytes.length);
           return {
             uri: uri.toString(),
             text: bytes.toString("utf8"),
           };
         } catch (error) {
+          performanceStats.count("workspace.readFailures");
           console.warn(`[Pawn Tools] Could not read ${uri.fsPath}`, error);
           return undefined;
         }
@@ -185,10 +202,15 @@ const indexWorkspaceFiles = async () => {
     );
 
     if (validFiles.length > 0) {
-      await client.sendNotification("pawn/indexFiles", {
-        files: validFiles,
-        deferGraphRebuild: true,
-      });
+      performanceStats.count("workspace.indexedFilesSent", validFiles.length);
+      performanceStats.count("workspace.indexBatches");
+      await performanceStats.measureAsync(
+        "workspace.indexNotification",
+        () => client.sendNotification("pawn/indexFiles", {
+          files: validFiles,
+          deferGraphRebuild: true,
+        })
+      );
     }
 
     // Yield to the extension host between small batches.
@@ -202,16 +224,89 @@ const sendIncludeConfiguration = async () => {
   if (!clientReady) return;
 
   const configuration = vscode.workspace.getConfiguration("pawn");
-  await client.sendNotification("pawn/configureIncludes", {
-    workspaceRoots: (vscode.workspace.workspaceFolders || []).map(
-      (folder) => folder.uri.fsPath
-    ),
-    includePaths: configuration.get<string[]>("includePaths", []),
-    compilerPath: configuration.get<string>("compilerPath", ""),
-  });
+  await performanceStats.measureAsync(
+    "includes.sendConfiguration",
+    () => client.sendNotification("pawn/configureIncludes", {
+      workspaceRoots: (vscode.workspace.workspaceFolders || []).map(
+        (folder) => folder.uri.fsPath
+      ),
+      includePaths: configuration.get<string[]>("includePaths", []),
+      compilerPath: configuration.get<string>("compilerPath", ""),
+    })
+  );
 };
 
 export async function activate(context: vscode.ExtensionContext) {
+  const activationStartedAt = performance.now();
+  performanceStats.setEnabled(
+    vscode.workspace.getConfiguration("pawn").get<boolean>("performanceLogging", false)
+  );
+
+  const performanceOutput = vscode.window.createOutputChannel("Pawn Performance");
+  context.subscriptions.push(performanceOutput);
+
+  const showPerformanceStats = async () => {
+    let serverSnapshot: PerformanceSnapshot | undefined;
+    if (clientReady) {
+      try {
+        serverSnapshot = await client.sendRequest<PerformanceSnapshot>(
+          "pawn/performanceStats"
+        );
+      } catch (error) {
+        performanceOutput.appendLine(
+          `Could not retrieve Language Server statistics: ${String(error)}`
+        );
+      }
+    }
+
+    performanceOutput.clear();
+    performanceOutput.appendLine(
+      formatPerformanceSnapshot("Extension Host", performanceStats.snapshot())
+    );
+    performanceOutput.appendLine("");
+    performanceOutput.appendLine(
+      serverSnapshot
+        ? formatPerformanceSnapshot("Language Server", serverSnapshot)
+        : "Language Server: not connected"
+    );
+    if (!performanceStats.isEnabled) {
+      performanceOutput.appendLine("");
+      performanceOutput.appendLine(
+        "Profiling is disabled. Run 'Pawn: Toggle Performance Logging' to enable it."
+      );
+    }
+    performanceOutput.show(true);
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("pawn.showPerformanceStats", showPerformanceStats),
+    vscode.commands.registerCommand("pawn.togglePerformanceLogging", async () => {
+      const configuration = vscode.workspace.getConfiguration("pawn");
+      const enabled = !configuration.get<boolean>("performanceLogging", false);
+      await configuration.update(
+        "performanceLogging",
+        enabled,
+        vscode.ConfigurationTarget.Global
+      );
+      performanceStats.setEnabled(enabled);
+      if (clientReady) {
+        await client.sendNotification("pawn/performanceEnabled", { enabled });
+      }
+      void vscode.window.showInformationMessage(
+        enabled
+          ? "Pawn performance logging enabled. Reload VS Code to include startup measurements."
+          : "Pawn performance logging disabled."
+      );
+    }),
+    vscode.commands.registerCommand("pawn.resetPerformanceStats", async () => {
+      performanceStats.reset();
+      if (clientReady) {
+        await client.sendNotification("pawn/performanceReset", {});
+      }
+      void vscode.window.showInformationMessage("Pawn performance statistics reset.");
+    })
+  );
+
   const serverModule = context.asAbsolutePath(join("out", "server", "server.js"));
   const debugOptions = { execArgv: ["--nolazy", "--inspect=6009"] };
 
@@ -272,6 +367,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("pawn.performanceLogging")) {
+        const enabled = vscode.workspace
+          .getConfiguration("pawn")
+          .get<boolean>("performanceLogging", false);
+        performanceStats.setEnabled(enabled);
+        if (clientReady) {
+          void client.sendNotification("pawn/performanceEnabled", { enabled });
+        }
+      }
+
       if (
         event.affectsConfiguration("pawn.includePaths") ||
         event.affectsConfiguration("pawn.compilerPath")
@@ -295,10 +400,31 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  const clientStartAt = performance.now();
   client.start().then(async () => {
+    performanceStats.record("extension.clientStart", performance.now() - clientStartAt);
     clientReady = true;
-    await indexWorkspaceFiles();
-    await sendIncludeConfiguration();
+    await client.sendNotification("pawn/performanceEnabled", {
+      enabled: performanceStats.isEnabled,
+    });
+
+    const startupStartedAt = performance.now();
+    await performanceStats.measureAsync(
+      "startup.workspaceIndexing",
+      indexWorkspaceFiles
+    );
+    await performanceStats.measureAsync(
+      "startup.includeConfiguration",
+      sendIncludeConfiguration
+    );
+    performanceStats.record(
+      "startup.postClientInitialization",
+      performance.now() - startupStartedAt
+    );
+    performanceStats.record(
+      "extension.activationToReady",
+      performance.now() - activationStartedAt
+    );
   }).catch((error: Error) => {
     console.error("[Pawn Tools] Language server failed to start", error);
   });

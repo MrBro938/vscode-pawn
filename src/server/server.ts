@@ -66,9 +66,22 @@ import {
   PawnIncludeMode,
 } from "./includeGraph";
 import { resolveIncludeConfiguration } from "./includeConfig";
+import { PerformanceMonitor } from "../performance";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
+const performanceStats = new PerformanceMonitor();
+
+connection.onNotification(
+  "pawn/performanceEnabled",
+  (params: { enabled?: boolean }) => {
+    performanceStats.setEnabled(params.enabled === true);
+  }
+);
+connection.onNotification("pawn/performanceReset", () => {
+  performanceStats.reset();
+});
+connection.onRequest("pawn/performanceStats", () => performanceStats.snapshot());
 
 const PARSE_DEBOUNCE_MS = 150;
 const pendingParses = new Map<string, ReturnType<typeof setTimeout>>();
@@ -89,14 +102,18 @@ let configuredIncludePaths: string[] = [];
 let configuredIncludeDirectories: string[] = [];
 let configuredCompilerPath = "";
 
-const rebuildIncludeGraph = () => {
-  includeGraph = buildPawnIncludeGraph(
-    indexedPawnFiles,
-    indexedPawnTexts,
-    includePathIndex,
-    configuredIncludeDirectories
-  );
-};
+const rebuildIncludeGraph = () => performanceStats.measure(
+  "include.graphRebuild",
+  () => {
+    includeGraph = buildPawnIncludeGraph(
+      indexedPawnFiles,
+      indexedPawnTexts,
+      includePathIndex,
+      configuredIncludeDirectories
+    );
+    performanceStats.count("include.graphFiles", includeGraph.size);
+  }
+);
 
 const normalizeIndexPath = (value: string) => {
   const normalized = path.normalize(value);
@@ -270,7 +287,9 @@ const scanIncludeDirectory = (
   }
 };
 
-const reloadConfiguredIncludes = () => {
+const reloadConfiguredIncludes = () => performanceStats.measure(
+  "include.reload",
+  () => {
   configuredIncludeFileUris.forEach((uri) => {
     // An include file may have been opened after it was discovered. Its live
     // TextDocument is authoritative, so keep its index entry during reload.
@@ -290,8 +309,10 @@ const reloadConfiguredIncludes = () => {
 
   configuredIncludeDirectories = configuration.includeDirectories;
   configuration.includeDirectories.forEach((directory) => {
+    performanceStats.count("include.directoriesScanned");
     scanIncludeDirectory(directory, configuredWorkspaceRoots, 20000);
   });
+  performanceStats.count("include.configuredFilesDiscovered", configuredIncludeFileUris.size);
 
   rebuildIncludeGraph();
 
@@ -300,7 +321,8 @@ const reloadConfiguredIncludes = () => {
   connection.sendNotification("pawn/includeDirectories", {
     directories: configuredIncludeDirectories,
   });
-};
+  }
+);
 
 documents.listen(connection);
 
@@ -340,19 +362,29 @@ const removeDocumentSymbols = (uri: string) => {
   definitionTokens.delete(uri);
 };
 
+const analyzePawnMeasured = (text: string): PawnAnalysis => {
+  const analysis = performanceStats.measure("analysis.parse", () => analyzePawn(text));
+  performanceStats.count("analysis.filesParsed");
+  performanceStats.count("analysis.tokens", analysis.tokens.length);
+  performanceStats.count("analysis.symbols", analysis.symbols.length);
+  return analysis;
+};
+
 const collectSymbols = (textDocument: TextDocument) => {
-  const text = textDocument.getText();
-  removeDocumentSymbols(textDocument.uri);
-  parseDefinitions(textDocument);
-  parseFunctions(textDocument);
-  const cachedAnalysis = analysisCache.get(textDocument.uri);
-  analysisCache.set(textDocument.uri, {
-    text,
-    analysis: cachedAnalysis?.text === text
-      ? cachedAnalysis.analysis
-      : analyzePawn(text),
+  performanceStats.measure("analysis.collectSymbols", () => {
+    const text = textDocument.getText();
+    removeDocumentSymbols(textDocument.uri);
+    performanceStats.measure("analysis.parseDefinitions", () => parseDefinitions(textDocument));
+    performanceStats.measure("analysis.parseFunctions", () => parseFunctions(textDocument));
+    const cachedAnalysis = analysisCache.get(textDocument.uri);
+    analysisCache.set(textDocument.uri, {
+      text,
+      analysis: cachedAnalysis?.text === text
+        ? cachedAnalysis.analysis
+        : analyzePawnMeasured(text),
+    });
+    indexedSymbolTexts.set(textDocument.uri, text);
   });
-  indexedSymbolTexts.set(textDocument.uri, text);
 };
 
 const ensureSymbolsIndexed = (uri: string) => {
@@ -428,7 +460,9 @@ connection.onNotification(
     files?: Array<{ uri: string; text: string }>;
     deleted?: string[];
     deferGraphRebuild?: boolean;
-  }) => {
+  }) => performanceStats.measure("index.notification", () => {
+    performanceStats.count("index.filesReceived", params.files?.length || 0);
+    performanceStats.count("index.filesDeleted", params.deleted?.length || 0);
     let needsFullGraphRebuild = false;
     let hasIndexChanges = false;
     const changedIncludeSources = new Set<string>();
@@ -490,7 +524,7 @@ connection.onNotification(
         void connection.languages.semanticTokens.refresh();
       }
     }
-  }
+  })
 );
 
 connection.onNotification(
@@ -610,25 +644,27 @@ const buildCompletionItems = (uri: string, offset: number): CompletionItem[] => 
   return buildPawnCompletionItems(uri, offset, sources);
 };
 
-connection.onCompletion((params: CompletionParams): CompletionList => {
-  const document = documents.get(params.textDocument.uri);
-  if (!document) return { isIncomplete: false, items: [] };
+connection.onCompletion((params: CompletionParams): CompletionList =>
+  performanceStats.measure("completion.request", () => {
+    const document = documents.get(params.textDocument.uri);
+    if (!document) return { isIncomplete: false, items: [] };
 
-  const offset = document.offsetAt(params.position);
-  const items = buildCompletionItems(params.textDocument.uri, offset);
-  const prefixMatch = /[A-Za-z_@][A-Za-z0-9_@]*$/.exec(
-    document.getText().slice(0, offset)
-  );
-  const prefix = prefixMatch ? prefixMatch[0].toLowerCase() : "";
+    const offset = document.offsetAt(params.position);
+    const items = buildCompletionItems(params.textDocument.uri, offset);
+    const prefixMatch = /[A-Za-z_@][A-Za-z0-9_@]*$/.exec(
+      document.getText().slice(0, offset)
+    );
+    const prefix = prefixMatch ? prefixMatch[0].toLowerCase() : "";
 
-  const filteredItems = prefix
-    ? items.filter((item) =>
-        String(item.filterText || item.label).toLowerCase().startsWith(prefix)
-      )
-    : items;
+    const filteredItems = prefix
+      ? items.filter((item) =>
+          String(item.filterText || item.label).toLowerCase().startsWith(prefix)
+        )
+      : items;
 
-  return { isIncomplete: false, items: filteredItems };
-});
+    return { isIncomplete: false, items: filteredItems };
+  })
+);
 
 const pawnKeywords = new Set([
   "if", "else", "while", "for", "do", "switch", "case", "default",
@@ -648,9 +684,13 @@ const getAnalysis = (uri: string): PawnAnalysis | undefined => {
   if (text === undefined) return undefined;
 
   const cached = analysisCache.get(uri);
-  if (cached && cached.text === text) return cached.analysis;
+  if (cached && cached.text === text) {
+    performanceStats.count("analysis.cacheHits");
+    return cached.analysis;
+  }
 
-  const analysis = analyzePawn(text);
+  performanceStats.count("analysis.cacheMisses");
+  const analysis = analyzePawnMeasured(text);
   analysisCache.set(uri, { text, analysis });
   return analysis;
 };
@@ -778,7 +818,8 @@ const semanticLegend: SemanticTokensLegend = {
   tokenModifiers: ["declaration"],
 };
 
-connection.languages.semanticTokens.on((params) => {
+connection.languages.semanticTokens.on((params) =>
+  performanceStats.measure("semanticTokens.request", () => {
   const document = documents.get(params.textDocument.uri);
   if (!document) return { data: [] };
 
@@ -907,15 +948,18 @@ connection.languages.semanticTokens.on((params) => {
   });
 
   return builder.build();
-});
+  })
+);
 
 connection.onCompletionResolve((item: CompletionItem): CompletionItem => item);
 
-connection.onHover((params: TextDocumentPositionParams): Hover | undefined => {
-  const doc = documents.get(params.textDocument.uri);
-  if (!doc) return undefined;
-  return doHover(doc, params.position);
-});
+connection.onHover((params: TextDocumentPositionParams): Hover | undefined =>
+  performanceStats.measure("hover.request", () => {
+    const doc = documents.get(params.textDocument.uri);
+    if (!doc) return undefined;
+    return doHover(doc, params.position);
+  })
+);
 
 const getFunctionInCompilationUnit = (
   uri: string,
@@ -1004,11 +1048,13 @@ const doHover = (
 
 connection.onSignatureHelp((params: SignatureHelpParams):
   | SignatureHelp
-  | undefined => {
-  const doc = documents.get(params.textDocument.uri);
-  if (!doc) return undefined;
-  return doSignHelp(doc, params.position);
-});
+  | undefined =>
+  performanceStats.measure("signatureHelp.request", () => {
+    const doc = documents.get(params.textDocument.uri);
+    if (!doc) return undefined;
+    return doSignHelp(doc, params.position);
+  })
+);
 
 const findFunctionSymbolInIncludeClosure = (
   uri: string,

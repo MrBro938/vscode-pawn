@@ -117,6 +117,18 @@
             {
                 "command": "extension.packageBuild",
                 "title": "Build Pawn Package"
+            },
+            {
+                "command": "pawn.showPerformanceStats",
+                "title": "Pawn: Show Performance Statistics"
+            },
+            {
+                "command": "pawn.togglePerformanceLogging",
+                "title": "Pawn: Toggle Performance Logging"
+            },
+            {
+                "command": "pawn.resetPerformanceStats",
+                "title": "Pawn: Reset Performance Statistics"
             }
         ],
         "configuration": {
@@ -134,6 +146,11 @@
                     "type": "string",
                     "default": "",
                     "description": "Path to the Pawn compiler executable or its directory. Used to locate the adjacent pawn.cfg and standard include directory."
+                },
+                "pawn.performanceLogging": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Collect local performance statistics for workspace indexing, Pawn analysis, semantic tokens and IntelliSense requests."
                 }
             }
         }
@@ -142,7 +159,7 @@
         "vscode:prepublish": "npm run compile",
         "compile": "tsc -p ./",
         "watch": "tsc -watch -p ./",
-        "test": "npm run compile && node test/analysis.test.cjs && node test/completion.test.cjs && node test/includeGraph.test.cjs && node test/includeConfig.test.cjs"
+        "test": "npm run compile && node test/analysis.test.cjs && node test/completion.test.cjs && node test/includeGraph.test.cjs && node test/includeConfig.test.cjs && node test/performance.test.cjs"
     },
     "devDependencies": {
         "typescript": "^7.0.2",
