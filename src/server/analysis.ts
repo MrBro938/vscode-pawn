@@ -249,7 +249,7 @@ const getLeadingMacroDocumentation = (
   const lastLine = text.slice(trimmed.start, trimmed.end);
   if (lastLine.endsWith("*/")) {
     const closingLineEnd = line.end;
-    let openingLine = line;
+    let openingLine: { start: number; end: number } | undefined = line;
     while (
       openingLine &&
       !text.slice(openingLine.start, openingLine.end).includes("/*")
