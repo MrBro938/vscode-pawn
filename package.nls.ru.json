@@ -1,0 +1,17 @@
+{
+    "extension.displayName": "Инструменты Pawn",
+    "extension.description": "Инструменты для Pawn в VS Code: подсветка синтаксиса, сниппеты и автодополнение для распространённых библиотек.",
+    "command.packageEnsure": "Установить зависимости пакета",
+    "command.packageBuild": "Собрать пакет Pawn",
+    "command.showPerformanceStats": "Pawn: Показать статистику производительности",
+    "command.togglePerformanceLogging": "Pawn: Включить или выключить сбор статистики производительности",
+    "command.resetPerformanceStats": "Pawn: Сбросить статистику производительности",
+    "configuration.title": "Инструменты Pawn",
+    "setting.includePaths.description": "Дополнительные каталоги include для Pawn. Относительные пути указываются относительно каждой папки рабочей области.",
+    "setting.compilerPath.description": "Путь к исполняемому файлу компилятора Pawn или к его каталогу. Используется для поиска расположенного рядом файла pawn.cfg и стандартного каталога include.",
+    "setting.performanceLogging.description": "Собирать локальную статистику производительности индексации рабочей области, анализа Pawn, семантических токенов и запросов IntelliSense.",
+    "setting.functionSearchScope.description": "Определяет, в каких файлах искать функции, объявления native и символы для автодополнения, подсказок при наведении, перехода к определению и Signature Help.",
+    "setting.functionSearchScope.includes": "Самый быстрый режим: поиск в текущем файле и во всех файлах, которые он рекурсивно подключает. Стандартные функции, например SetPlayerPos, находятся через a_samp.inc, если этот файл подключён.",
+    "setting.functionSearchScope.compilationUnit": "Искать в текущем файле, подключённых им файлах и файлах, которые подключают текущий файл.",
+    "setting.functionSearchScope.workspace": "Искать во всех индексируемых Pawn-файлах рабочей области и настроенных каталогах include. В больших проектах этот режим может работать медленнее."
+}
