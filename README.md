@@ -1,154 +1,199 @@
-# vscode-pawn
+# Pawn Tools for Visual Studio Code
 
-Pawn tools for vscode.
+Pawn Tools adds language support for **Pawn** projects to Visual Studio Code. It is designed for Pawn development, including SA-MP and open.mp projects.
 
-Currently this is a port of the Sublime Text package which includes proper Pawn
-syntax highlighting, autocompletions for the standard library and some popular
-libraries.
-
-If you like development tools that speed up your workflow and increase
-productivity, check out **[sampctl](http://bit.ly/sampctl-thread)**!
-
-Coming soon:
-
-* Static Analysis
-* Auto-complete
-* Intellisense support
-
-## Installation
-
-Just search for "Pawn Tools" in the vscode extensions and install it.
-
-Alternatively, you can check out the source code or view the marketplace page:
-
-* [GitHub Page](https://github.com/Southclaws/vscode-pawn)
-* [Marketplace Page](https://marketplace.visualstudio.com/items?itemName=southclaws.vscode-pawn)
-
-## Compiling Pawn Code
-
-To actually compile after you've set up the `tasks.json` below, press
-CTRL+Shift+B (Windows) or CMD+Shift+B (Mac), or alternatively open up the
-command palette with CTRL+Shift+P (Windows) or CMD+Shift+P (Mac) and type
-`Run Task`, hit enter and select `build-normal`.
-
-If you use [sampctl](http://bit.ly/sampctl) it's the same process except you'll
-have four options in the `Run Task` list:
-
-* `build only` - build the package
-* `build watcher` - build the package on every file change
-* `run tests` - run the package
-* `run tests watcher` - run the package on every file change
-
-### With `sampctl package init`
-
-If you're using sampctl, the `sampctl package init` command will automatically
-generate a vscode `tasks.json` if you selected `vscode` in the editor part of
-the setup menu.
-
-If you've already got a package but you didn't do this, you can simply download
-the `tasks.json` from the
-[Pawn Package template repo](https://github.com/Southclaws/pawn-package-template/blob/master/.vscode/tasks.json).
-
-Once you've done that, there's no more setup needed!
-
-### Creating `tasks.json`
-
-Code uses a method called "Tasks" to run compilers and build tools. All you need
-to do is create a folder named `.vscode` in your project's directory and in
-there, create a file named `tasks.json`.
-
-![https://i.imgur.com/ywElfTy.gif](https://i.imgur.com/ywElfTy.gif)
-
-Then paste the following relevant snippet into that file, depending on your primary shell:
-
-#### PowerShell
-
-```json
-{
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "build-normal",
-      "type": "shell",
-      "command": "${workspaceRoot}/pawno/pawncc.exe",
-      "args": ["${file}", "--%", "-Dgamemodes", "-;+", "-(+", "-d3"],
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      },
-      "isBackground": false,
-      "presentation": {
-        "reveal": "silent",
-        "panel": "dedicated"
-      },
-      "problemMatcher": "$pawncc"
-    }
-  ]
-}
-```
-
-#### Command Prompt (cmd.exe)
-
-This example includes no escape characters, so you can adapt this to other shells such as Bash, Oil, Fish, etc.
-
-```json
-{
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "build-normal",
-      "type": "shell",
-      "command": "${workspaceRoot}/pawno/pawncc.exe",
-      "args": ["${file}", "-Dgamemodes", "-;+", "-(+", "-d3"],
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      },
-      "isBackground": false,
-      "presentation": {
-        "reveal": "silent",
-        "panel": "dedicated"
-      },
-      "problemMatcher": "$pawncc"
-    }
-  ]
-}
-```
-
-#### Explanation
-
-`"command": "${workspaceRoot}/pawno/pawncc.exe",` is the important bit here,
-this is the path to your Pawn compiler and I've assumed most of you have a
-left-over `pawno` folder from that long dead text editor! This folder not only
-contains Pawno but also the Pawn code compiler (`pawncc.exe`). You can safely
-delete `pawno.exe` forever.
-
-`"args": [...],` is also important, this is where you define the arguments
-passed to the compiler. Pawno also did this but you might not have known. The
-defaults have always been `-;+` to force semicolon usage and `-(+` to force
-brackets in statements.
-
-If you store your Pawn compiler elsewhere, just replace the entire `command`
-setting with the full path to your compiler.
-
-Also, if you want to disable debug symbols (you won't be able to use
-crashdetect) just remove `-d3` from `"args"`.
-
-`problemMatcher` is the part that allows recognising the Pawn compiler output
-and presenting it in the `problems` panel of the editor. This doesn't work well
-with external includes because the paths change from relative to absolute.
-[sampctl](http://bit.ly/sampctl-thread) fortunately fixes this (and a lot of
-other annoying things).
+The extension supports `.p`, `.pawn`, `.pwn`, and `.inc` files.
 
 ## Features
 
-Currently just syntax highlighting and completions from the Sublime project.
+### Editing and IntelliSense
 
-Once the [Pawn-Parser](https://github.com/Southclaws/pawn-parser) project
-reaches a workable state, this extension will feature more language features
-such as intellisense support, go-to-definition, view-all-references, etc...
+- **Syntax highlighting** for Pawn source files.
+- **Semantic highlighting** based on symbols found by the Pawn analyzer.
+- **Code completion** for keywords, functions, native declarations, macros, enums, variables, and symbols from included files.
+- **Scope-aware suggestions**: local variables and parameters are suggested only after their declaration and while they are in scope.
+- **Function and macro signatures** while typing a call, including parameter information.
+- **Hover information** for recognized functions and symbols.
+- **Go to Definition** for Pawn symbols and include directives.
+- **Find All References** and **Rename Symbol**.
+- **Document Outline** with functions, enums, constants, variables, and enum members.
+- **Snippets** for Pawn syntax, standard functions and definitions, and community libraries.
 
-Here's what the problems panel looks like when the tasks.json is set up
-properly:
+### Include and project support
 
-![https://i.imgur.com/k8ST5pih.png](https://i.imgur.com/k8ST5pih.png)
+The language server builds an include graph and uses it to resolve symbols across the current file and its dependencies.
+
+Include directories can be discovered from project and compiler configuration, including:
+
+- The workspace and project include settings.
+- `pawn.json` and `pawn.yaml` package configuration.
+- Compiler `pawn.cfg` files and compiler include directories.
+- `-i` include arguments and package dependencies.
+- Additional paths configured with `pawn.includePaths`.
+
+### Color previews
+
+Color swatches are available for:
+
+- Hex color literals such as `0xRRGGBB` and `0xRRGGBBAA`.
+- SA-MP inline text color tags such as `{FF8800}` inside Pawn strings.
+- Color constants declared with `#define`, including simple aliases and definitions resolved through included files.
+
+For example:
+
+``
+pawn
+#define COLOR_GREY 0xAFAFAFAA
+#define COLOR_HINT COLOR_GREY
+
+HUD_SendMessage(playerid, COLOR_GREY, "Hello");
+HUD_SendMessage(playerid, COLOR_HINT, "Another message");
+```
+
+The preview is displayed next to recognized color values and references. It does not rewrite the source code.
+
+### Build integration
+
+The extension contributes two problem matchers:
+
+- `$pawncc` — parses Pawn compiler output.
+- `$sampctl` — parses sampctl output, including watcher builds.
+
+Compiler messages can therefore appear in the VS Code **Problems** panel when your build task uses the matching problem matcher.
+
+### Performance tools
+
+The language server uses cached analysis, include and completion data, and semantic-token results to avoid repeating work unnecessarily.
+
+Optional performance logging can help investigate slow workspace indexing or language-service requests. Use the commands described below to enable it and inspect the collected statistics.
+
+## Installation
+
+### Install a VSIX from GitHub Actions
+
+1. Open the repository's [Actions](https://github.com/MrBro938/vscode-pawn/actions/workflows/build.yml) page.
+2. Open a successful **Build Pawn Tools** run for the commit you want to install.
+3. Download the `Pawn-Tools.vsix` artifact.
+4. In VS Code, open the Command Palette with `Ctrl+Shift+P` / `Cmd+Shift+P`.
+5. Run **Extensions: Install from VSIX...** and select the downloaded file.
+
+### Build from source
+
+Requirements: Node.js 22 and npm.
+
+```bash
+git clone https://github.com/MrBro938/vscode-pawn.git
+cd vscode-pawn
+npm ci
+npm test
+npx --yes @vscode/vsce package --out Pawn-Tools.vsix
+```
+
+Then install `Pawn-Tools.vsix` using **Extensions: Install from VSIX...**.
+
+## Configuration
+
+Open VS Code settings and search for `Pawn`, or add the following to your workspace `.vscode/settings.json`:
+
+```json
+{
+  "pawn.includePaths": [
+    "./include",
+    "./pawno/include"
+  ],
+  "pawn.compilerPath": "C:/path/to/pawncc.exe",
+  "pawn.functionSearchScope": "includes",
+  "pawn.performanceLogging": false
+}
+```
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `pawn.includePaths` | `[]` | Additional include directories. Relative paths are resolved from each workspace folder. |
+| `pawn.compilerPath` | `""` | Path to the Pawn compiler executable or its directory. Used to locate the adjacent `pawn.cfg` and standard include directory. |
+| `pawn.functionSearchScope` | `includes` | Controls how broadly cross-file symbols are searched for completion, hover, Go to Definition, and Signature Help. |
+| `pawn.performanceLogging` | `false` | Collect local performance statistics for indexing, analysis, semantic tokens, and IntelliSense requests. |
+
+### Function search scope
+
+Choose the search range that best fits your project:
+
+| Value | Search scope |
+| --- | --- |
+| `includes` | **Default and fastest.** Searches the active file and files it includes, recursively. For example, standard functions such as `SetPlayerPos` can be found through `a_samp.inc` when it is included. |
+| `compilationUnit` | Searches the active file, its includes, and files that include the active file. |
+| `workspace` | Searches all indexed Pawn files in the workspace and configured include directories. This can take longer in large projects. |
+
+For most projects, keep the default `includes` setting. Use `workspace` when you need to find symbols that are not reachable through the current file's include tree.
+
+## Building Pawn projects
+
+Pawn Tools provides problem matchers; it does not bundle the Pawn compiler or sampctl. Configure your compiler or build tool separately.
+
+### Using sampctl
+
+Install and configure [sampctl](https://github.com/Southclaws/sampctl) for your project, then add a task such as this to `.vscode/tasks.json`:
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Pawn package",
+      "type": "shell",
+      "command": "sampctl",
+      "args": ["build"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$sampctl"
+    }
+  ]
+}
+```
+
+Run the task with `Ctrl+Shift+B` / `Cmd+Shift+B`, or choose **Tasks: Run Task** from the Command Palette.
+
+### Using pawncc directly
+
+Create a task that runs your `pawncc` executable and set:
+
+```json
+"problemMatcher": "$pawncc"
+```
+
+Update the compiler path and arguments to match your local project structure and build options.
+
+## Commands
+
+Open the Command Palette and search for:
+
+| Command | Description |
+| --- | --- |
+| **Pawn: Show Performance Statistics** | Opens the performance output with Extension Host and Language Server statistics. |
+| **Pawn: Toggle Performance Logging** | Enables or disables collection of performance statistics. |
+| **Pawn: Reset Performance Statistics** | Clears the collected counters and timings. |
+
+When performance logging is disabled, the extension continues to work normally; only the additional profiling data is omitted.
+
+## Compatibility
+
+- Visual Studio Code **1.144.0 or newer**.
+- Pawn source files with the extensions `.p`, `.pawn`, `.pwn`, and `.inc`.
+
+The compiler and build system are separate tools and must be installed independently.
+
+## Development
+
+The main extension code is in `src/`; the language server is in `src/server/`. Tests are in `test/`.
+
+Useful scripts:
+
+```bash
+npm run compile
+npm test
+npm run watch
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for project changes.
