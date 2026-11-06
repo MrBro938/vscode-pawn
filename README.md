@@ -41,13 +41,12 @@ Color swatches are available for:
 
 For example:
 
-``
-pawn
+```
 #define COLOR_GREY 0xAFAFAFAA
 #define COLOR_HINT COLOR_GREY
 
-HUD_SendMessage(playerid, COLOR_GREY, "Hello");
-HUD_SendMessage(playerid, COLOR_HINT, "Another message");
+SendClientMessage(playerid, COLOR_GREY, "Hello");
+SendClientMessage(playerid, COLOR_HINT, "Another message");
 ```
 
 The preview is displayed next to recognized color values and references. It does not rewrite the source code.
