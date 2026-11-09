@@ -14,7 +14,7 @@ try {
   const log = fs.readFileSync(logPath, "utf8");
   assert.ok(log.includes("[Test]"), "log should include the source label");
   assert.ok(log.includes("diagnostic test failure"), "log should include the error message");
-  assert.ok(log.includes("diagnostic test failure"), "log should include the stack trace");
+  assert.ok(log.includes(error.stack), "log should include the complete stack trace");
   assert.ok(log.includes("extra diagnostic details"), "log should include additional details");
 
   appendCrashLog(undefined, "Test", "ignored");

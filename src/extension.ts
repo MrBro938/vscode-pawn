@@ -525,8 +525,14 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   let serverInitializationInProgress = false;
+  let serverInitializationRequested = false;
   const initializeServer = async () => {
-    if (serverInitializationInProgress || isDeactivating) return;
+    if (isDeactivating) return;
+    if (serverInitializationInProgress) {
+      serverInitializationRequested = true;
+      return;
+    }
+    serverInitializationRequested = false;
     serverInitializationInProgress = true;
     clientReady = true;
 
@@ -551,6 +557,10 @@ export async function activate(context: vscode.ExtensionContext) {
       );
     } finally {
       serverInitializationInProgress = false;
+      if (serverInitializationRequested && client.state === State.Running && !isDeactivating) {
+        serverInitializationRequested = false;
+        void initializeServer().catch(reportServerStartupError);
+      }
     }
   };
 

@@ -66,6 +66,8 @@ The language server uses cached analysis, include and completion data, and seman
 
 Optional performance logging can help investigate slow workspace indexing or language-service requests. Use the commands described below to enable it and inspect the collected statistics.
 
+Crash diagnostics are also collected automatically. If the language server stops unexpectedly, VS Code shows a notification with an option to open the log. If the Extension Host exits without normal deactivation, the extension offers to open the log the next time it starts.
+
 ## Installation
 
 ### Install a VSIX from GitHub Actions
@@ -173,6 +175,7 @@ Open the Command Palette and search for:
 | **Pawn: Show Performance Statistics** | Opens the performance output with Extension Host and Language Server statistics. |
 | **Pawn: Toggle Performance Logging** | Enables or disables collection of performance statistics. |
 | **Pawn: Reset Performance Statistics** | Clears the collected counters and timings. |
+| **Pawn: Open Crash Log** | Opens the crash log stored in the extension global storage. |
 
 When performance logging is disabled, the extension continues to work normally; only the additional profiling data is omitted.
 
