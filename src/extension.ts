@@ -1,8 +1,9 @@
 import { isAbsolute, join, relative, resolve } from "path";
-import { readFile } from "fs";
+import { existsSync, mkdirSync, readFile, readFileSync, unlinkSync, writeFileSync } from "fs";
 import * as vscode from "vscode";
 import { performance } from "perf_hooks";
-import { LanguageClient, ServerOptions, TransportKind } from "vscode-languageclient/node";
+import { appendCrashLog } from "./crashDiagnostics";
+import { LanguageClient, ServerOptions, State, TransportKind } from "vscode-languageclient/node";
 import {
   PerformanceMonitor,
   PerformanceSnapshot,
@@ -15,6 +16,12 @@ let client: LanguageClient;
 let clientReady = false;
 let refreshPawnColorDefinesFromIndex: (() => void) | undefined;
 const performanceStats = new PerformanceMonitor();
+let crashLogPath: string | undefined;
+let sessionMarkerPath: string | undefined;
+let extensionHostCrashMonitor: ((error: Error, origin: string) => void) | undefined;
+let isDeactivating = false;
+let serverHasBeenRunning = false;
+let lastServerCrashNotificationAt = 0;
 
 const pawnGlob = "**/*.{p,pwn,pawn,inc}";
 const excludedGlob = "**/{.git,node_modules,.vscode-test,dist,out}/**";
@@ -243,6 +250,55 @@ const sendIncludeConfiguration = async () => {
 
 export async function activate(context: vscode.ExtensionContext) {
   const activationStartedAt = performance.now();
+  isDeactivating = false;
+  crashLogPath = join(context.globalStorageUri.fsPath, "crash.log");
+  sessionMarkerPath = join(context.globalStorageUri.fsPath, "session-active");
+
+  let previousSessionCrashed = false;
+  try {
+    mkdirSync(context.globalStorageUri.fsPath, { recursive: true });
+    previousSessionCrashed = existsSync(sessionMarkerPath);
+    if (previousSessionCrashed) {
+      let previousSessionDetails = "The previous session marker was still present at activation.";
+      try {
+        previousSessionDetails = readFileSync(sessionMarkerPath, "utf8");
+      } catch {
+        // The marker may be inaccessible; the recovery notice is still useful.
+      }
+      appendCrashLog(
+        crashLogPath,
+        "Extension Host recovery",
+        "The previous session did not complete normal deactivation.",
+        previousSessionDetails
+      );
+    }
+
+    writeFileSync(sessionMarkerPath, JSON.stringify({
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+      vscodeVersion: vscode.version,
+      extensionVersion: String(context.extension.packageJSON.version || "unknown"),
+    }, null, 2), "utf8");
+  } catch (error) {
+    console.error("[Pawn Tools] Could not initialize crash diagnostics", error);
+  }
+
+  appendCrashLog(
+    crashLogPath,
+    "Extension Host",
+    "Pawn Tools activation started.",
+    `PID: ${process.pid}\nVS Code: ${vscode.version}\nExtension: ${String(context.extension.packageJSON.version || "unknown")}`
+  );
+
+  extensionHostCrashMonitor = (error, origin) => {
+    appendCrashLog(
+      crashLogPath,
+      "Extension Host uncaught exception",
+      error,
+      `Origin: ${origin}\nNote: the Extension Host is shared; this error may originate from another extension.`
+    );
+  };
+  process.on("uncaughtExceptionMonitor", extensionHostCrashMonitor);
   performanceStats.setEnabled(
     vscode.workspace.getConfiguration("pawn").get<boolean>("performanceLogging", false)
   );
@@ -354,6 +410,23 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  const openCrashLog = async () => {
+    const filePath = crashLogPath;
+    if (!filePath) return;
+
+    try {
+      if (!existsSync(filePath)) {
+        appendCrashLog(filePath, "Diagnostics", "Crash log opened before any crash was recorded.");
+      }
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        `Не удалось открыть лог Pawn Tools: ${String(error)}`
+      );
+    }
+  };
+
   const performanceOutput = vscode.window.createOutputChannel("Pawn Performance");
   context.subscriptions.push(performanceOutput);
 
@@ -416,17 +489,28 @@ export async function activate(context: vscode.ExtensionContext) {
         await client.sendNotification("pawn/performanceReset", {});
       }
       void vscode.window.showInformationMessage("Pawn performance statistics reset.");
-    })
+    }),
+    vscode.commands.registerCommand("pawn.openCrashLog", openCrashLog)
   );
+
+  if (previousSessionCrashed) {
+    void vscode.window.showWarningMessage(
+      "Pawn Tools обнаружил, что предыдущий сеанс VS Code завершился без штатного закрытия расширения. Открыть диагностический лог?",
+      "Открыть лог"
+    ).then((selection) => {
+      if (selection === "Открыть лог") void openCrashLog();
+    });
+  }
 
   const serverModule = context.asAbsolutePath(join("out", "server", "server.js"));
   const debugOptions = { execArgv: ["--nolazy", "--inspect=6009"] };
 
   const serverOptions: ServerOptions = {
-    run: { module: serverModule, transport: TransportKind.ipc },
+    run: { module: serverModule, transport: TransportKind.ipc, args: ["--pawn-crash-log", crashLogPath || ""] },
     debug: {
       module: serverModule,
       transport: TransportKind.ipc,
+      args: ["--pawn-crash-log", crashLogPath || ""],
       options: debugOptions,
     },
   };
@@ -440,7 +524,89 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  let serverInitializationInProgress = false;
+  const initializeServer = async () => {
+    if (serverInitializationInProgress || isDeactivating) return;
+    serverInitializationInProgress = true;
+    clientReady = true;
+
+    try {
+      await client.sendNotification("pawn/performanceEnabled", {
+        enabled: performanceStats.isEnabled,
+      });
+
+      const startupStartedAt = performance.now();
+      await performanceStats.measureAsync(
+        "startup.workspaceIndexing",
+        indexWorkspaceFiles
+      );
+      await performanceStats.measureAsync(
+        "startup.includeConfiguration",
+        sendIncludeConfiguration
+      );
+      await refreshPawnColorDefines();
+      performanceStats.record(
+        "startup.postClientInitialization",
+        performance.now() - startupStartedAt
+      );
+    } finally {
+      serverInitializationInProgress = false;
+    }
+  };
+
+  const reportServerStartupError = (error: unknown) => {
+    clientReady = false;
+    appendCrashLog(crashLogPath, "Pawn Server initialization", error);
+    void vscode.window.showErrorMessage(
+      "Не удалось запустить или восстановить Pawn Server. Диагностика сохранена в crash.log.",
+      "Открыть лог"
+    ).then((selection) => {
+      if (selection === "Открыть лог") void openCrashLog();
+    });
+  };
+
   context.subscriptions.push(
+    client.onDidChangeState(({ oldState, newState }) => {
+      if (newState === State.Running) {
+        const isRestart = serverHasBeenRunning;
+        serverHasBeenRunning = true;
+
+        if (isRestart && !isDeactivating) {
+          appendCrashLog(
+            crashLogPath,
+            "Pawn Server",
+            "Language Server process restarted."
+          );
+          void initializeServer().catch(reportServerStartupError);
+        }
+        return;
+      }
+
+      if (
+        oldState === State.Running &&
+        newState === State.Stopped &&
+        serverHasBeenRunning &&
+        !isDeactivating
+      ) {
+        clientReady = false;
+        appendCrashLog(
+          crashLogPath,
+          "Pawn Server",
+          "Language Server stopped unexpectedly. The process may have crashed or been terminated."
+        );
+
+        const now = Date.now();
+        if (now - lastServerCrashNotificationAt >= 30000) {
+          lastServerCrashNotificationAt = now;
+          void vscode.window.showErrorMessage(
+            "Pawn Server неожиданно завершил работу. Подробности сохранены в crash.log.",
+            "Открыть лог"
+          ).then((selection) => {
+            if (selection === "Открыть лог") void openCrashLog();
+          });
+        }
+      }
+    }),
     client.onNotification(
       "pawn/includeDirectories",
       (params: { directories?: string[] }) => {
@@ -526,35 +692,42 @@ export async function activate(context: vscode.ExtensionContext) {
   const clientStartAt = performance.now();
   client.start().then(async () => {
     performanceStats.record("extension.clientStart", performance.now() - clientStartAt);
-    clientReady = true;
-    await client.sendNotification("pawn/performanceEnabled", {
-      enabled: performanceStats.isEnabled,
-    });
-
-    const startupStartedAt = performance.now();
-    await performanceStats.measureAsync(
-      "startup.workspaceIndexing",
-      indexWorkspaceFiles
-    );
-    await performanceStats.measureAsync(
-      "startup.includeConfiguration",
-      sendIncludeConfiguration
-    );
-    await refreshPawnColorDefines();
-    performanceStats.record(
-      "startup.postClientInitialization",
-      performance.now() - startupStartedAt
-    );
+    await initializeServer();
     performanceStats.record(
       "extension.activationToReady",
       performance.now() - activationStartedAt
     );
-  }).catch((error: Error) => {
-    console.error("[Pawn Tools] Language server failed to start", error);
-  });
+  }).catch(reportServerStartupError);
 }
 
 export function deactivate(): Thenable<void> | undefined {
   clientReady = false;
-  return client ? client.stop() : undefined;
+  isDeactivating = true;
+
+  const cleanup = () => {
+    if (extensionHostCrashMonitor) {
+      process.removeListener("uncaughtExceptionMonitor", extensionHostCrashMonitor);
+      extensionHostCrashMonitor = undefined;
+    }
+
+    if (sessionMarkerPath) {
+      try {
+        unlinkSync(sessionMarkerPath);
+      } catch {
+        // The marker may already have been removed.
+      }
+    }
+  };
+
+  if (!client) {
+    cleanup();
+    return undefined;
+  }
+
+  return client.stop().then(() => {
+    cleanup();
+  }, (error) => {
+    appendCrashLog(crashLogPath, "Pawn Server shutdown", error);
+    cleanup();
+  });
 }

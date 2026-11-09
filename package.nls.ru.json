@@ -6,6 +6,7 @@
     "command.showPerformanceStats": "Pawn: Показать статистику производительности",
     "command.togglePerformanceLogging": "Pawn: Включить или выключить сбор статистики производительности",
     "command.resetPerformanceStats": "Pawn: Сбросить статистику производительности",
+    "command.openCrashLog": "Pawn: Открыть лог сбоев",
     "configuration.title": "Инструменты Pawn",
     "setting.includePaths.description": "Дополнительные каталоги include для Pawn. Относительные пути указываются относительно каждой папки рабочей области.",
     "setting.compilerPath.description": "Путь к исполняемому файлу компилятора Pawn или к его каталогу. Используется для поиска расположенного рядом файла pawn.cfg и стандартного каталога include.",

@@ -6,6 +6,7 @@
     "command.showPerformanceStats": "Pawn: Show Performance Statistics",
     "command.togglePerformanceLogging": "Pawn: Toggle Performance Logging",
     "command.resetPerformanceStats": "Pawn: Reset Performance Statistics",
+    "command.openCrashLog": "Pawn: Open Crash Log",
     "configuration.title": "Pawn Tools",
     "setting.includePaths.description": "Additional Pawn include directories. Relative paths are resolved from each workspace folder.",
     "setting.compilerPath.description": "Path to the Pawn compiler executable or its directory. Used to locate the adjacent pawn.cfg and standard include directory.",

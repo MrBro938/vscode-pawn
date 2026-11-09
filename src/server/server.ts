@@ -78,6 +78,7 @@ import {
 } from "./includeGraph";
 import { resolveIncludeConfiguration } from "./includeConfig";
 import { PerformanceMonitor } from "../performance";
+import { appendCrashLog } from "../crashDiagnostics";
 import {
   extractPawnColorDefineExpressions,
   PawnColorDefine,
@@ -90,6 +91,34 @@ import {
   resolveSemanticTokenSymbolKind,
   SemanticTokensDependencySnapshot,
 } from "./semanticTokensCache";
+
+const crashLogArgumentIndex = process.argv.indexOf("--pawn-crash-log");
+const crashLogPath = crashLogArgumentIndex >= 0
+  ? process.argv[crashLogArgumentIndex + 1]
+  : undefined;
+let uncaughtExceptionLogged = false;
+
+if (crashLogPath) {
+  process.on("uncaughtExceptionMonitor", (error: Error, origin: string) => {
+    uncaughtExceptionLogged = true;
+    appendCrashLog(
+      crashLogPath,
+      "Pawn Language Server uncaught exception",
+      error,
+      `Origin: ${origin}`
+    );
+  });
+
+  process.on("exit", (code) => {
+    if (code !== 0 && !uncaughtExceptionLogged) {
+      appendCrashLog(
+        crashLogPath,
+        "Pawn Language Server process exit",
+        `Process exited with code ${code}.`
+      );
+    }
+  });
+}
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
