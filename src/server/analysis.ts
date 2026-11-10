@@ -32,6 +32,8 @@ export interface PawnSymbol {
   /** Declared parameters, retained for definitions and prototypes alike. */
   parameters?: PawnParameter[];
   detail?: string;
+  /** Explicit numeric value assigned to an enum member. */
+  value?: string;
   /** Pawn preprocessor placeholders in the macro pattern, e.g. ["%1", "%2"]. */
   macroParameters?: string[];
   /** The pattern suffix immediately following the macro name, e.g. "(%1,%2)" or "[%1]". */
@@ -609,6 +611,30 @@ export const analyzePawn = (
       const declared = findDeclaredName(tokens, memberStart, memberEnd);
       if (!declared) return;
 
+      let value: string | undefined;
+      for (let valueIndex = memberStart; valueIndex < memberEnd; valueIndex++) {
+        if (!isPunctuation(tokens[valueIndex], "=")) continue;
+
+        let numberIndex = valueIndex + 1;
+        let sign = "";
+        if (
+          tokens[numberIndex]?.kind === "punctuation" &&
+          (tokens[numberIndex].value === "-" || tokens[numberIndex].value === "+")
+        ) {
+          sign = tokens[numberIndex].value;
+          numberIndex++;
+        }
+
+        const valueToken = tokens[numberIndex];
+        if (
+          valueToken?.kind === "number" &&
+          /^(?:0[xX][0-9a-fA-F]+|[0-9]+)$/.test(valueToken.value)
+        ) {
+          value = sign + valueToken.value;
+        }
+        break;
+      }
+
       addSymbol(symbols, {
         name: declared.token.value,
         kind: "enumMember",
@@ -619,6 +645,7 @@ export const analyzePawn = (
         isArray: declared.isArray,
         tag: declared.tag,
         detail: enumName ? enumName.value : "enum",
+        value,
       });
     });
     index = close;
