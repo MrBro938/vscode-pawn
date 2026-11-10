@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 
+const { formatPawnSymbolHover } = require("../out/server/symbolDisplay.js");
 const {
   analyzePawn,
   resolvePawnSymbol,
@@ -47,6 +48,38 @@ assert.ok(find("g_Total", "global"), "global variable should be indexed");
 assert.ok(find("E_PLAYER", "enum"), "named enum should be indexed");
 assert.ok(find("E_ID", "enumMember"), "enum member should be indexed");
 assert.ok(find("E_PLAYER", "type"), "enum tag should also be registered as a Pawn type");
+
+const enumValueSource = [
+  "enum E_CALLING_SERVICES {",
+  "    CALLING_SERVICES_MEDIC_LS = 0,",
+  "    CALLING_SERVICES_MEDIC_SF = 1,",
+  "    CALLING_SERVICES_MEDIC_LV = 2,",
+  "    CALLING_SERVICES_MEDIC_DEFAULT,",
+  "    CALLING_SERVICES_MEDIC_NEGATIVE = -3,",
+  "    CALLING_SERVICES_MEDIC_HEX = 0x10",
+  "}"
+].join("\n");
+const enumValueAnalysis = analyzePawn(enumValueSource);
+const enumValue = (name) => enumValueAnalysis.symbols.find(
+  (symbol) => symbol.kind === "enumMember" && symbol.name === name
+);
+assert.equal(enumValue("CALLING_SERVICES_MEDIC_LS")?.value, "0",
+  "enum members with an explicit zero value should retain it");
+assert.equal(enumValue("CALLING_SERVICES_MEDIC_SF")?.value, "1",
+  "enum members should retain explicit numeric values");
+assert.equal(enumValue("CALLING_SERVICES_MEDIC_LV")?.value, "2",
+  "enum members should retain explicit numeric values");
+assert.equal(enumValue("CALLING_SERVICES_MEDIC_DEFAULT")?.value, undefined,
+  "implicit enum values should not be reported as explicit values");
+assert.equal(enumValue("CALLING_SERVICES_MEDIC_NEGATIVE")?.value, "-3",
+  "negative explicit enum values should be retained");
+assert.equal(enumValue("CALLING_SERVICES_MEDIC_HEX")?.value, "0x10",
+  "hexadecimal explicit enum values should be retained");
+assert.match(
+  formatPawnSymbolHover(enumValue("CALLING_SERVICES_MEDIC_LS")),
+  /\*\*Value:\*\* 0/,
+  "enum hover should display the explicitly assigned numeric value"
+);
 assert.equal(find("E_NAME", "enumMember").isArray, true, "enum array member should be marked as an array");
 
 const tagSource = [
