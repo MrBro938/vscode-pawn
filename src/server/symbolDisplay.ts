@@ -76,6 +76,9 @@ export const formatPawnSymbolHover = (symbol: PawnSymbol): string => {
     `**${kindLabels[symbol.kind]}**`,
     `\`${symbol.name}\` — **${typeText}**`,
   ];
+  if (symbol.kind === "enumMember" && symbol.value !== undefined) {
+    lines.push(`**Value:** ${symbol.value}`);
+  }
   if (symbol.detail) lines.push(`Declaration: \`${symbol.detail}\``);
   if (symbol.documentation) lines.push(symbol.documentation);
   return lines.join("\n\n");
