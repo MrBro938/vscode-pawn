@@ -114,6 +114,10 @@ const markServerActivity = (activity: string) => {
   lastServerActivityAt = new Date().toISOString();
 };
 
+const connection = createConnection(ProposedFeatures.all);
+const documents = new TextDocuments(TextDocument);
+const performanceStats = new PerformanceMonitor();
+
 const writeServerRuntimeSnapshot = () => {
   writeRuntimeSnapshot(
     serverRuntimeSnapshotPath,
@@ -122,7 +126,6 @@ const writeServerRuntimeSnapshot = () => {
       lastActivityAt: lastServerActivityAt,
       shutdownRequestedByClient: serverExitRequested,
       openDocumentCount: documents.all().length,
-      indexedPawnFileCount: indexedPawnFiles.size,
     })
   );
 };
@@ -176,10 +179,6 @@ if (crashLogPath) {
     }
   });
 }
-
-const connection = createConnection(ProposedFeatures.all);
-const documents = new TextDocuments(TextDocument);
-const performanceStats = new PerformanceMonitor();
 
 connection.onExit(() => {
   serverExitRequested = true;
