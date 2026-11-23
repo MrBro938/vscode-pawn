@@ -66,7 +66,9 @@ The language server uses cached analysis, include and completion data, and seman
 
 Optional performance logging can help investigate slow workspace indexing or language-service requests. Use the commands described below to enable it and inspect the collected statistics.
 
-Crash diagnostics are also collected automatically. If the language server stops unexpectedly, VS Code shows a notification with an option to open the log. If the Extension Host exits without normal deactivation, the extension offers to open the log the next time it starts.
+Crash diagnostics are also collected automatically. The extension and language server save periodic runtime checkpoints with process memory, V8 heap usage, active resources and the last tracked operation. If the language server stops unexpectedly, VS Code shows a notification with an option to open the log. If the Extension Host exits without normal deactivation, the extension offers to open the log the next time it starts.
+
+For hard native crashes or forced process termination, JavaScript handlers may not run. On Windows, see [Windows crash dump collection](docs/windows-crash-dumps.md) for optional Windows Error Reporting (WER) setup.
 
 ## Installation
 

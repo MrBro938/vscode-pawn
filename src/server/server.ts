@@ -78,7 +78,11 @@ import {
 } from "./includeGraph";
 import { resolveIncludeConfiguration } from "./includeConfig";
 import { PerformanceMonitor } from "../performance";
-import { appendCrashLog } from "../crashDiagnostics";
+import {
+  appendCrashLog,
+  createRuntimeSnapshot,
+  writeRuntimeSnapshot,
+} from "../crashDiagnostics";
 import {
   extractPawnColorDefineExpressions,
   PawnColorDefine,
@@ -96,25 +100,78 @@ const crashLogArgumentIndex = process.argv.indexOf("--pawn-crash-log");
 const crashLogPath = crashLogArgumentIndex >= 0
   ? process.argv[crashLogArgumentIndex + 1]
   : undefined;
+const serverRuntimeSnapshotPath = crashLogPath
+  ? path.join(path.dirname(crashLogPath), "pawn-server-state.json")
+  : undefined;
 let uncaughtExceptionLogged = false;
+let serverExitRequested = false;
+let lastServerActivity = "module initialization";
+let lastServerActivityAt = new Date().toISOString();
+let serverRuntimeHeartbeat: NodeJS.Timeout | undefined;
+
+const markServerActivity = (activity: string) => {
+  lastServerActivity = activity;
+  lastServerActivityAt = new Date().toISOString();
+};
+
+const writeServerRuntimeSnapshot = () => {
+  writeRuntimeSnapshot(
+    serverRuntimeSnapshotPath,
+    createRuntimeSnapshot("Pawn Language Server", {
+      lastActivity: lastServerActivity,
+      lastActivityAt: lastServerActivityAt,
+      shutdownRequestedByClient: serverExitRequested,
+      openDocumentCount: documents.all().length,
+      indexedPawnFileCount: indexedPawnFiles.size,
+    })
+  );
+};
 
 if (crashLogPath) {
+  writeServerRuntimeSnapshot();
+  serverRuntimeHeartbeat = setInterval(writeServerRuntimeSnapshot, 15000);
+  serverRuntimeHeartbeat.unref();
+
   process.on("uncaughtExceptionMonitor", (error: Error, origin: string) => {
     uncaughtExceptionLogged = true;
+    writeServerRuntimeSnapshot();
     appendCrashLog(
       crashLogPath,
       "Pawn Language Server uncaught exception",
       error,
-      `Origin: ${origin}`
+      `Origin: ${origin}\nLast activity: ${lastServerActivity}\nLast activity time: ${lastServerActivityAt}`
+    );
+  });
+
+  process.on("warning", (warning: Error) => {
+    appendCrashLog(
+      crashLogPath,
+      "Pawn Language Server process warning",
+      warning,
+      `Last activity: ${lastServerActivity}`
+    );
+  });
+
+  process.on("beforeExit", (code) => {
+    if (serverExitRequested) return;
+    writeServerRuntimeSnapshot();
+    appendCrashLog(
+      crashLogPath,
+      "Pawn Language Server beforeExit",
+      `Node.js emitted beforeExit with code ${code} without an LSP exit notification.`,
+      `Last activity: ${lastServerActivity}\nLast activity time: ${lastServerActivityAt}`
     );
   });
 
   process.on("exit", (code) => {
-    if (code !== 0 && !uncaughtExceptionLogged) {
+    if (serverRuntimeHeartbeat) clearInterval(serverRuntimeHeartbeat);
+    if (!serverExitRequested || (code !== 0 && !uncaughtExceptionLogged)) {
+      writeServerRuntimeSnapshot();
       appendCrashLog(
         crashLogPath,
         "Pawn Language Server process exit",
-        `Process exited with code ${code}.`
+        `Process exited with code ${code}. LSP exit notification received: ${serverExitRequested}. Uncaught exception logged: ${uncaughtExceptionLogged}.`,
+        `Last activity: ${lastServerActivity}\nLast activity time: ${lastServerActivityAt}`
       );
     }
   });
@@ -123,6 +180,17 @@ if (crashLogPath) {
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 const performanceStats = new PerformanceMonitor();
+
+connection.onExit(() => {
+  serverExitRequested = true;
+  markServerActivity("LSP exit notification received");
+  writeServerRuntimeSnapshot();
+  appendCrashLog(
+    crashLogPath,
+    "Pawn Language Server",
+    "Received the normal LSP exit notification from the client."
+  );
+});
 
 connection.onNotification(
   "pawn/performanceEnabled",
@@ -517,6 +585,7 @@ const reloadConfiguredIncludes = () => performanceStats.measure(
 documents.listen(connection);
 
 connection.onInitialize((params) => {
+  markServerActivity("LSP initialize request");
   semanticTokensRefreshSupported =
     params.capabilities.workspace?.semanticTokens?.refreshSupport === true;
 
@@ -646,18 +715,21 @@ const scheduleCollectSymbols = (
 };
 
 documents.onDidOpen((change) => {
+  markServerActivity(`Document opened: ${change.document.uri}`);
   if (change.document.uri.startsWith("file:")) {
     indexPawnFile(change.document.uri, change.document.getText());
   }
   scheduleCollectSymbols(change.document, true);
 });
 documents.onDidChangeContent((change) => {
+  markServerActivity(`Document changed: ${change.document.uri}`);
   if (change.document.uri.startsWith("file:")) {
     indexPawnFile(change.document.uri, change.document.getText());
   }
   scheduleCollectSymbols(change.document);
 });
 documents.onDidClose((event) => {
+  markServerActivity(`Document closed: ${event.document.uri}`);
   const pending = pendingParses.get(event.document.uri);
   if (pending) clearTimeout(pending);
   pendingParses.delete(event.document.uri);
@@ -687,7 +759,9 @@ connection.onNotification(
     files?: Array<{ uri: string; text: string }>;
     deleted?: string[];
     deferGraphRebuild?: boolean;
-  }) => performanceStats.measure("index.notification", () => {
+  }) => {
+    markServerActivity(`Index notification: ${params.files?.length || 0} files, ${params.deleted?.length || 0} deleted`);
+    return performanceStats.measure("index.notification", () => {
     performanceStats.count("index.filesReceived", params.files?.length || 0);
     performanceStats.count("index.filesDeleted", params.deleted?.length || 0);
     let needsFullGraphRebuild = false;
@@ -755,7 +829,8 @@ connection.onNotification(
         void connection.languages.semanticTokens.refresh();
       }
     }
-  })
+    });
+  }
 );
 
 connection.onNotification(
@@ -766,6 +841,7 @@ connection.onNotification(
     compilerPath?: string;
     functionSearchScope?: string;
   }) => {
+    markServerActivity("Include configuration updated");
     configuredWorkspaceRoots = (params.workspaceRoots || [])
       .filter((value) => typeof value === "string")
       .map((value) => path.resolve(value));
@@ -781,7 +857,10 @@ connection.onNotification(
 
 connection.onNotification(
   "pawn/functionSearchScope",
-  (params: { scope?: string }) => setFunctionSearchScope(params.scope)
+  (params: { scope?: string }) => {
+    markServerActivity("Function search scope changed");
+    setFunctionSearchScope(params.scope);
+  }
 );
 
 connection.onDidChangeConfiguration(() => {

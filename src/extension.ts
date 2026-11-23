@@ -2,7 +2,11 @@ import { isAbsolute, join, relative, resolve } from "path";
 import { existsSync, mkdirSync, readFile, readFileSync, unlinkSync, writeFileSync } from "fs";
 import * as vscode from "vscode";
 import { performance } from "perf_hooks";
-import { appendCrashLog } from "./crashDiagnostics";
+import {
+  appendCrashLog,
+  createRuntimeSnapshot,
+  writeRuntimeSnapshot,
+} from "./crashDiagnostics";
 import { LanguageClient, ServerOptions, State, TransportKind } from "vscode-languageclient/node";
 import {
   PerformanceMonitor,
@@ -19,6 +23,14 @@ const performanceStats = new PerformanceMonitor();
 let crashLogPath: string | undefined;
 let sessionMarkerPath: string | undefined;
 let extensionHostCrashMonitor: ((error: Error, origin: string) => void) | undefined;
+let extensionHostExitMonitor: ((code: number) => void) | undefined;
+let extensionHostBeforeExitMonitor: ((code: number) => void) | undefined;
+let extensionHostWarningMonitor: ((warning: Error) => void) | undefined;
+let extensionRuntimeHeartbeat: NodeJS.Timeout | undefined;
+let runtimeSnapshotPath: string | undefined;
+let serverRuntimeSnapshotPath: string | undefined;
+let lastExtensionActivity = "activation";
+let lastExtensionActivityAt = new Date().toISOString();
 let isDeactivating = false;
 let serverHasBeenRunning = false;
 let lastServerCrashNotificationAt = 0;
@@ -253,6 +265,10 @@ export async function activate(context: vscode.ExtensionContext) {
   isDeactivating = false;
   crashLogPath = join(context.globalStorageUri.fsPath, "crash.log");
   sessionMarkerPath = join(context.globalStorageUri.fsPath, "session-active");
+  runtimeSnapshotPath = join(context.globalStorageUri.fsPath, "extension-host-state.json");
+  serverRuntimeSnapshotPath = join(context.globalStorageUri.fsPath, "pawn-server-state.json");
+  lastExtensionActivity = "activation";
+  lastExtensionActivityAt = new Date().toISOString();
 
   let previousSessionCrashed = false;
   try {
@@ -265,11 +281,26 @@ export async function activate(context: vscode.ExtensionContext) {
       } catch {
         // The marker may be inaccessible; the recovery notice is still useful.
       }
+      const previousSnapshots: string[] = [];
+      [
+        ["Extension Host", runtimeSnapshotPath],
+        ["Pawn Language Server", serverRuntimeSnapshotPath],
+      ].forEach(([label, snapshotPath]) => {
+        if (!snapshotPath || !existsSync(snapshotPath)) return;
+        try {
+          previousSnapshots.push(
+            `Last checkpoint — ${label}:\n${readFileSync(snapshotPath, "utf8")}`
+          );
+        } catch {
+          previousSnapshots.push(`Last checkpoint — ${label}: could not be read.`);
+        }
+      });
+
       appendCrashLog(
         crashLogPath,
         "Extension Host recovery",
         "The previous session did not complete normal deactivation.",
-        previousSessionDetails
+        [previousSessionDetails, ...previousSnapshots].join("\n\n")
       );
     }
 
@@ -290,15 +321,91 @@ export async function activate(context: vscode.ExtensionContext) {
     `PID: ${process.pid}\nVS Code: ${vscode.version}\nExtension: ${String(context.extension.packageJSON.version || "unknown")}`
   );
 
+  const markExtensionActivity = (activity: string) => {
+    lastExtensionActivity = activity;
+    lastExtensionActivityAt = new Date().toISOString();
+  };
+
+  const writeExtensionRuntimeSnapshot = () => {
+    const activeEditor = vscode.window.activeTextEditor;
+    const currentClientState = typeof client === "undefined"
+      ? "not-created"
+      : String(client.state);
+
+    writeRuntimeSnapshot(
+      runtimeSnapshotPath,
+      createRuntimeSnapshot("Extension Host", {
+        lastActivity: lastExtensionActivity,
+        lastActivityAt: lastExtensionActivityAt,
+        clientState: currentClientState,
+        clientReady,
+        isDeactivating,
+        activeEditor: activeEditor ? {
+          languageId: activeEditor.document.languageId,
+          fileName: activeEditor.document.fileName,
+          uri: activeEditor.document.uri.toString(),
+        } : null,
+        openDocumentCount: vscode.workspace.textDocuments.length,
+        workspaceFolders: (vscode.workspace.workspaceFolders || []).map(
+          (folder) => folder.uri.fsPath
+        ),
+      })
+    );
+  };
+
+  writeExtensionRuntimeSnapshot();
+  extensionRuntimeHeartbeat = setInterval(writeExtensionRuntimeSnapshot, 15000);
+  extensionRuntimeHeartbeat.unref();
+
   extensionHostCrashMonitor = (error, origin) => {
+    writeExtensionRuntimeSnapshot();
     appendCrashLog(
       crashLogPath,
       "Extension Host uncaught exception",
       error,
-      `Origin: ${origin}\nNote: the Extension Host is shared; this error may originate from another extension.`
+      `Origin: ${origin}\nLast activity: ${lastExtensionActivity}\nNote: the Extension Host is shared; this error may originate from another extension.`
     );
   };
+  extensionHostExitMonitor = (code) => {
+    if (!sessionMarkerPath || !existsSync(sessionMarkerPath)) return;
+    let lastCheckpoint = "No runtime checkpoint is available.";
+    try {
+      if (runtimeSnapshotPath && existsSync(runtimeSnapshotPath)) {
+        lastCheckpoint = readFileSync(runtimeSnapshotPath, "utf8");
+      }
+    } catch {
+      lastCheckpoint = "The runtime checkpoint could not be read during process exit.";
+    }
+    appendCrashLog(
+      crashLogPath,
+      "Extension Host process exit",
+      `Node.js emitted the exit event with code ${code}, but the active-session marker was still present. Extension deactivation cleanup had not completed.`,
+      lastCheckpoint
+    );
+  };
+  extensionHostBeforeExitMonitor = (code) => {
+    if (!sessionMarkerPath || !existsSync(sessionMarkerPath)) return;
+    writeExtensionRuntimeSnapshot();
+    appendCrashLog(
+      crashLogPath,
+      "Extension Host beforeExit",
+      `Node.js emitted beforeExit with code ${code} while the Pawn Tools session marker was still present.`,
+      `Last activity: ${lastExtensionActivity}\nLast activity time: ${lastExtensionActivityAt}`
+    );
+  };
+  extensionHostWarningMonitor = (warning) => {
+    appendCrashLog(
+      crashLogPath,
+      "Extension Host process warning",
+      warning,
+      "Warnings come from the shared Extension Host and may originate from another extension."
+    );
+  };
+
   process.on("uncaughtExceptionMonitor", extensionHostCrashMonitor);
+  process.on("exit", extensionHostExitMonitor);
+  process.on("beforeExit", extensionHostBeforeExitMonitor);
+  process.on("warning", extensionHostWarningMonitor);
   performanceStats.setEnabled(
     vscode.workspace.getConfiguration("pawn").get<boolean>("performanceLogging", false)
   );
@@ -393,6 +500,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
       if (event.document.languageId !== "pawn") return;
+      markExtensionActivity(`Pawn document changed: ${event.document.fileName}`);
       const firstChangedLine = event.contentChanges.reduce(
         (minimum, change) => Math.min(minimum, change.range.start.line),
         Number.MAX_SAFE_INTEGER
@@ -415,6 +523,23 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!filePath) return;
 
     try {
+      [
+        ["Extension Host latest checkpoint", runtimeSnapshotPath],
+        ["Pawn Server latest checkpoint", serverRuntimeSnapshotPath],
+      ].forEach(([label, snapshotPath]) => {
+        if (!snapshotPath || !existsSync(snapshotPath)) return;
+        try {
+          appendCrashLog(
+            filePath,
+            String(label),
+            "Latest saved runtime state.",
+            readFileSync(snapshotPath, "utf8")
+          );
+        } catch {
+          appendCrashLog(filePath, String(label), "The runtime checkpoint could not be read.");
+        }
+      });
+
       if (!existsSync(filePath)) {
         appendCrashLog(filePath, "Diagnostics", "Crash log opened before any crash was recorded.");
       }
@@ -535,6 +660,7 @@ export async function activate(context: vscode.ExtensionContext) {
     serverInitializationRequested = false;
     serverInitializationInProgress = true;
     clientReady = true;
+    markExtensionActivity("Pawn Server running; initializing workspace");
 
     try {
       await client.sendNotification("pawn/performanceEnabled", {
@@ -555,6 +681,8 @@ export async function activate(context: vscode.ExtensionContext) {
         "startup.postClientInitialization",
         performance.now() - startupStartedAt
       );
+      markExtensionActivity("Pawn Server initialized; workspace indexing completed");
+      writeExtensionRuntimeSnapshot();
     } finally {
       serverInitializationInProgress = false;
       if (serverInitializationRequested && client.state === State.Running && !isDeactivating) {
@@ -577,6 +705,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     client.onDidChangeState(({ oldState, newState }) => {
+      markExtensionActivity(`Pawn Server state changed: ${State[oldState]} -> ${State[newState]}`);
+      writeExtensionRuntimeSnapshot();
       if (newState === State.Running) {
         const isRestart = serverHasBeenRunning;
         serverHasBeenRunning = true;
@@ -715,9 +845,28 @@ export function deactivate(): Thenable<void> | undefined {
   isDeactivating = true;
 
   const cleanup = () => {
+    lastExtensionActivity = "deactivation cleanup completed";
+    lastExtensionActivityAt = new Date().toISOString();
+    if (extensionRuntimeHeartbeat) {
+      clearInterval(extensionRuntimeHeartbeat);
+      extensionRuntimeHeartbeat = undefined;
+    }
+
     if (extensionHostCrashMonitor) {
       process.removeListener("uncaughtExceptionMonitor", extensionHostCrashMonitor);
       extensionHostCrashMonitor = undefined;
+    }
+    if (extensionHostExitMonitor) {
+      process.removeListener("exit", extensionHostExitMonitor);
+      extensionHostExitMonitor = undefined;
+    }
+    if (extensionHostBeforeExitMonitor) {
+      process.removeListener("beforeExit", extensionHostBeforeExitMonitor);
+      extensionHostBeforeExitMonitor = undefined;
+    }
+    if (extensionHostWarningMonitor) {
+      process.removeListener("warning", extensionHostWarningMonitor);
+      extensionHostWarningMonitor = undefined;
     }
 
     if (sessionMarkerPath) {
